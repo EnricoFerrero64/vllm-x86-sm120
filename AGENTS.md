@@ -5,6 +5,10 @@ Aider, custom harnesses) on how to **pull, configure, serve, and
 benchmark** this container correctly on a DGX Spark or other consumer
 Blackwell host.
 
+> **Note**: The entire **Qwen3.6-27B** family is now unified onto this single
+> image, `ghcr.io/aeon-7/aeon-vllm-ultimate:latest`, served with **DFlash
+> `num_speculative_tokens: 12`**. There is no longer a separate per-repo image.
+
 ## What this container is
 
 A patched build of `vllm==0.22.1` that:
@@ -118,14 +122,29 @@ docker run -d --gpus all --ipc=host --shm-size=16g --net=host \
     --dtype auto \
     --quantization compressed-tensors \
     --kv-cache-dtype auto \
-    --speculative-config '{"method":"dflash","model":"/drafter","num_speculative_tokens":4}' \
+    --speculative-config '{"method":"dflash","model":"/drafter","num_speculative_tokens":12}' \
     --max-model-len 24576 --max-num-seqs 8 --max-num-batched-tokens 8192 \
     --gpu-memory-utilization 0.78 \
     --enable-chunked-prefill --enable-prefix-caching --mamba-block-size 256 \
     --trust-remote-code
 ```
 
-> ⚠️ **`method: "dflash"`** is the correct value (not `"speculators"`). And **`--kv-cache-dtype auto`** is required — in vLLM 0.22.1 the non-causal attention backends lost their FP8/NVFP4 KV kernels, so DFlash falls back to FLASH_ATTN + BF16 KV. To get FP8 KV with DFlash today, use the v3 production image (`ghcr.io/aeon-7/vllm-aeon-ultimate-dflash:qwen36-v3`).
+> ⚠️ **`method: "dflash"`** is the correct value (not `"speculators"`). Use the
+> **default** drafter backend — do **not** add `attention_backend` to the
+> spec-config (the default works for Qwen3.6 on this image). And **leave
+> `--kv-cache-dtype` unset (BF16)** — the non-causal DFlash drafter requires
+> BF16 KV; do not force FP8 or NVFP4 KV with DFlash.
+>
+> **Why `num_speculative_tokens: 12` and why this image matters for long
+> context**: the z-lab Qwen3.6-27B DFlash drafter is a sliding-window model —
+> 4 of its 5 layers use sliding-window attention (window 2048). vLLM PR #40898
+> (in `aeon-vllm-ultimate:latest`) runs those layers as proper SWA; earlier
+> images ran them as full attention, so drafting collapsed once context grew
+> past ~2048 tokens. PR #41703 additionally makes `--enable-prefix-caching`
+> corruption-immune with DFlash. Net: long-context drafting holds up;
+> short-context (<2048, one window) is unchanged. n=12 won the n=8–15 sweep
+> (statistically tied short-context, best long-context acceptance) and is the
+> production default.
 
 ## Variant: TurboQuant K8V4 4-bit KV (extreme memory budget)
 
