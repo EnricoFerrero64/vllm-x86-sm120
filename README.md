@@ -10,6 +10,58 @@ Built on **vLLM v0.23.0 compiled from source for sm_121a**, merged with the AEON
 
 > 🆕 **2026-06-18 — `:latest` is now the v0.23.0 sm_121a build (`:2026-06-18-v0.23.0-dflashfix`).** Rebuilt from source on vLLM v0.23.0 as a 3-way merge that preserves the AEON spec-decode tree, and adds the **DFlash high-concurrency fix** (port of upstream PR #43982): the drafter previously **crashed at ≥32 concurrent requests** under speculative decoding (padded-vs-unpadded KV block-table shape mismatch) and now scales cleanly to **c=64**. Carries the still-open PR #44389 (NVFP4-KV), #40898 (DFlash SWA), #41703 (prefix-cache corruption). See [What we fixed for the DGX Spark](#what-we-fixed-for-the-dgx-spark) and the [v0.23.0 fleet benchmarks](#v0230-fleet-benchmarks--one-image-three-models). Rollback tag: `:2026-06-11-pr41703`.
 
+## Quickstart (DGX Spark, copy-paste)
+
+The canonical Spark recipe: **Qwen3.6-27B NVFP4 body + z-lab DFlash drafter + FP8 KV** — the measured-best daily-driver config. One block pulls the container, the model, and the drafter, then serves on `:8000`. (Full deployment matrix — MTP/NVFP4-KV, TurboQuant, Gemma-4-26B, dedicated-VRAM Blackwell — is in [Deployment recipes](#deployment-recipes) further down.)
+
+```bash
+# 1) Pull the unified container (vLLM 0.23.0 + sm_121a + DFlash high-concurrency fix)
+docker pull ghcr.io/aeon-7/aeon-vllm-ultimate:latest
+
+# 2) Pull the NVFP4 body (compressed-tensors, ~26 GB) — fresh clone
+GIT_LFS_SKIP_SMUDGE=1 git clone \
+  https://huggingface.co/AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-NVFP4 \
+  /models/Qwen3.6-27B-AEON-NVFP4
+( cd /models/Qwen3.6-27B-AEON-NVFP4 && git lfs pull )
+
+# 3) Pull the DFlash drafter (z-lab 5-layer, ~3.3 GB) — fresh clone (DFlash only)
+GIT_LFS_SKIP_SMUDGE=1 git clone \
+  https://huggingface.co/z-lab/Qwen3.6-27B-DFlash \
+  /models/Qwen3.6-27B-DFlash-drafter
+( cd /models/Qwen3.6-27B-DFlash-drafter && git lfs pull )
+
+# 4) Serve — DFlash drafter + FP8 KV (mounts body at /model, drafter at /drafter)
+docker run -d --name aeon-vllm \
+    --gpus all --ipc=host --shm-size=16g \
+    --net=host \
+    -v /models/Qwen3.6-27B-AEON-NVFP4:/model:ro \
+    -v /models/Qwen3.6-27B-DFlash-drafter:/drafter:ro \
+    --entrypoint vllm \
+    ghcr.io/aeon-7/aeon-vllm-ultimate:latest \
+    serve /model \
+        --served-model-name aeon \
+        --dtype auto \
+        --quantization compressed-tensors \
+        --kv-cache-dtype fp8_e4m3 \
+        --max-model-len 24576 \
+        --max-num-seqs 8 \
+        --max-num-batched-tokens 8192 \
+        --gpu-memory-utilization 0.78 \
+        --enable-chunked-prefill \
+        --enable-prefix-caching \
+        --mamba-block-size 256 \
+        --speculative-config '{"method":"dflash","model":"/drafter","num_speculative_tokens":12}' \
+        --trust-remote-code
+
+# 5) Smoke test
+curl -s http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"aeon","messages":[{"role":"user","content":"Hello!"}],"max_tokens":64,"temperature":0.0}' \
+  | jq .choices[0].message.content
+```
+
+> **Why these flags:** `--quantization compressed-tensors` (the NVFP4 body is `nvfp4-pack-quantized`, not modelopt); `--kv-cache-dtype fp8_e4m3` (DFlash is non-causal and can't pair with NVFP4 KV on sm_121a today — see [Recipe A](#recipe-a--dgx-spark-dflash-drafter--fp8-kv-recommended-for-daily-driver)); `--gpu-memory-utilization 0.78` (**never exceed 0.88 on Spark** — unified LPDDR5X thrashes above that); `--mamba-block-size 256` for Qwen3.6's hybrid GatedDeltaNet+attention stack. If `git clone` leaves LFS pointer files, re-run `git lfs pull` in the model dir so vLLM sees real weights.
+
 ## What's inside
 
 | Component | Version | Why |
@@ -166,9 +218,9 @@ DFlash and EAGLE3 drafters are supported natively via vLLM's `--speculative-conf
 ### 🔬 Native Blackwell SM 12.1 sm_121a compute
 Built for `TORCH_CUDA_ARCH_LIST="12.1a"` — the sm_121a target for the GB10 in DGX Spark. Also runs on RTX 5090 / RTX 5080 / RTX PRO 6000 Blackwell (sm_120) thanks to the same family matcher in vLLM main.
 
-## Quick start
+## Deployment recipes
 
-The canonical target is the **AEON-7 Qwen3.6 family** — see [Validated models](#validated-models) below. Pick the variant that matches your hardware, then follow the matching recipe.
+The [Quickstart](#quickstart-dgx-spark-copy-paste) at the top is the canonical daily-driver path (Recipe A). This section is the full deployment matrix: the canonical target is the **AEON-7 Qwen3.6 family** — see [Validated models](#validated-models) below. Pick the variant that matches your hardware, then follow the matching recipe.
 
 ### Pull the image
 
@@ -191,47 +243,7 @@ This is the **measured-best config** for DGX Spark per the AEON-7 Qwen3.6 routin
 >
 > Use **`--kv-cache-dtype fp8_e4m3`** with DFlash. NVFP4 KV works cleanly with causal speculators (`mtp`, `qwen3_5_mtp`, `eagle3`, `ngram`) — see Recipe B.
 
-#### Step 1 — download the base + DFlash drafter
-
-```bash
-# 1) Base — compressed-tensors NVFP4 + DFlash production variant (26 GB)
-huggingface-cli download \
-  AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-NVFP4 \
-  --local-dir /models/Qwen3.6-27B-AEON-NVFP4
-
-# 2) DFlash drafter — z-lab's 5-layer Qwen3.6 drafter (3.3 GB)
-huggingface-cli download \
-  z-lab/Qwen3.6-27B-DFlash \
-  --local-dir /models/Qwen3.6-27B-DFlash-drafter
-```
-
-> ⚠️ **Materialize the drafter dir.** If `huggingface-cli` stores symlinks into the HF cache blob dir, vLLM's bind-mounted container can't follow them. Either pass `--local-dir-use-symlinks=False` (newer hf_hub) or `cp -L $HF_CACHE/snapshots/<hash>/* /models/Qwen3.6-27B-DFlash-drafter/` so the files are real.
-
-#### Step 2 — serve with DFlash + NVFP4 KV
-
-```bash
-docker run -d --name aeon-vllm \
-    --gpus all --ipc=host --shm-size=16g \
-    --net=host \
-    -v /models/Qwen3.6-27B-AEON-NVFP4:/model:ro \
-    -v /models/Qwen3.6-27B-DFlash-drafter:/drafter:ro \
-    --entrypoint vllm \
-    ghcr.io/aeon-7/aeon-vllm-ultimate:latest \
-    serve /model \
-        --served-model-name aeon \
-        --dtype auto \
-        --quantization compressed-tensors \
-        --kv-cache-dtype fp8_e4m3 \
-        --max-model-len 24576 \
-        --max-num-seqs 8 \
-        --max-num-batched-tokens 8192 \
-        --gpu-memory-utilization 0.78 \
-        --enable-chunked-prefill \
-        --enable-prefix-caching \
-        --mamba-block-size 256 \
-        --speculative-config '{"method":"dflash","model":"/drafter","num_speculative_tokens":12}' \
-        --trust-remote-code
-```
+This is the recipe in the [top Quickstart](#quickstart-dgx-spark-copy-paste) — the full pull-container + pull-model + pull-drafter + serve block is there; don't duplicate it here. The serve flags below are the same ones; this section just explains each.
 
 **Key flags**:
 - `--quantization compressed-tensors` — the NVFP4 production model is in compressed-tensors format (`format: nvfp4-pack-quantized`), not modelopt. Use `--quantization modelopt` for the `*-MTP-XS` variants.

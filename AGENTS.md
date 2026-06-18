@@ -5,13 +5,18 @@ Aider, custom harnesses) on how to **pull, configure, serve, and
 benchmark** this container correctly on a DGX Spark or other consumer
 Blackwell host.
 
-> **Note**: The entire **Qwen3.6-27B** family is now unified onto this single
-> image, `ghcr.io/aeon-7/aeon-vllm-ultimate:latest`, served with **DFlash
-> `num_speculative_tokens: 12`**. There is no longer a separate per-repo image.
+> **Note**: The entire AEON fleet — **Qwen3.6-27B**, **Qwen3.6-35B-A3B**, and
+> **Gemma-4-26B-A4B** — is now unified onto this single image,
+> `ghcr.io/aeon-7/aeon-vllm-ultimate:latest` (= `:2026-06-18-v0.23.0-dflashfix`;
+> rollback `:2026-06-11-pr41703`), served with **DFlash
+> `num_speculative_tokens: 12`**. The old lineage (`omni-q36`, `vllm-spark-*`,
+> `aeon-gemma-4-26b-a4b-dflash`, `vllm-aeon-ultimate-*`, `vllm-dflash`) is
+> consolidated into this image — historical only. There is no longer a separate
+> per-repo image.
 
 ## What this container is
 
-A patched build of `vllm==0.22.1` that:
+A from-source build of **vLLM v0.23.0** (compiled for sm_121a) that:
 
 - Uses **PR #44389**'s Triton software NVFP4 KV cache (~3× capacity
   vs FP8 at the same memory budget — value when serving long context
@@ -21,11 +26,19 @@ A patched build of `vllm==0.22.1` that:
 - Bundles **TurboQuant K8V4** (AEON-7 CUDA-graph-safe QJL fork),
   **DFlash speculative drafting**, and **transformers HEAD** (needed
   for `gemma4_unified` and other 2026-Q2 architectures).
-- Applies three idempotent AEON sm_121a runtime patches that no-op
-  when upstream merges the equivalent fix:
+- Applies **two** idempotent AEON sm_121a runtime patches that no-op
+  when upstream merges the equivalent fix (the old `kv_cache_utils`
+  patch was **dropped in 0.23.0** — `block_size` is now an `int`
+  upstream, so the `min()`-over-`None` reduction no longer applies):
   1. `cuda_optional_import` — wrap MXFP8/MXFP6 SM100 kernels in RTLD_LAZY
-  2. `kv_cache_utils` — strip `None` from hybrid linear+attention `min()` reductions
-  3. `cudagraph_align` — PIECEWISE mode rounds spec-decode capture sizes
+  2. `cudagraph_align` — PIECEWISE mode rounds spec-decode capture sizes
+- Plus the **new in-tree DFlash high-concurrency fix** (port of upstream
+  **PR #43982**): slices the drafter's KV block-table to the unpadded
+  batch so DFlash no longer **crashes at ≥32 concurrent requests**
+  (padded-vs-unpadded block-table shape mismatch) and now scales to **c=64**.
+- Carries three still-open upstream PRs in-tree (3-way merged): **#44389**
+  (Triton NVFP4 KV), **#40898** (DFlash sliding-window attention), **#41703**
+  (Gemma-4 DFlash prefix-cache-safe).
 
 ## Hard requirements
 
@@ -38,8 +51,10 @@ A patched build of `vllm==0.22.1` that:
 
 ```bash
 docker pull ghcr.io/aeon-7/aeon-vllm-ultimate:latest
-# or pin to a tagged build
-docker pull ghcr.io/aeon-7/aeon-vllm-ultimate:v0.22.1-pr44389-spark
+# or pin the current build (vLLM 0.23.0 + DFlash high-concurrency fix)
+docker pull ghcr.io/aeon-7/aeon-vllm-ultimate:2026-06-18-v0.23.0-dflashfix
+# previous build (pre-v0.23.0 / pre-concurrency-fix) kept for rollback
+docker pull ghcr.io/aeon-7/aeon-vllm-ultimate:2026-06-11-pr41703
 ```
 
 ## Verify the image is healthy before serving
@@ -57,83 +72,72 @@ print(\"flashinfer:\", flashinfer.__version__)
 ```
 
 **Expected output**:
-- `vllm: 0.22.1+pr44389.aeon`
+- `vllm: 0.23.0+sm121a.aeon`
 - `torch: 2.11.0+cu130 13.0`
 - `cuda available: True`
 - `sm: (12, 1)` on GB10 or `(12, 0)` on consumer Blackwell
-- `flashinfer: 0.6.8.post1`
+- `flashinfer: 0.6.12`
 
 If `sm: (9, 0)` (Hopper) or `cuda available: False`, **stop** — this is the wrong image for this host.
 
-## Standard serve recipe (Qwen3.6, NVFP4 + MTP + NVFP4 KV)
+## Standard serve recipe (Qwen3.6, NVFP4 body + DFlash drafter + FP8 KV)
+
+This is the **canonical daily-driver recipe** — identical to the
+[Quickstart in the README](README.md#quickstart-dgx-spark-copy-paste). The
+drafter is a **separate ~3.3 GB BF16 checkpoint** trained on the matching base;
+clone the body and the drafter fresh, then bind-mount both:
 
 ```bash
-docker run -d \
-  --name aeon-vllm \
-  --gpus all \
-  --ipc=host --shm-size=16g \
-  --net=host \
-  -v /path/to/model:/model:ro \
-  --entrypoint vllm \
-  ghcr.io/aeon-7/aeon-vllm-ultimate:latest \
-  serve /model \
-    --served-model-name aeon \
-    --dtype auto \
-    --quantization modelopt \
-    --kv-cache-dtype nvfp4 \
-    --max-model-len 24576 \
-    --max-num-seqs 8 \
-    --max-num-batched-tokens 4096 \
-    --gpu-memory-utilization 0.78 \
-    --enable-chunked-prefill \
-    --enable-prefix-caching \
-    --mamba-block-size 256 \
-    --speculative-config '{"method":"mtp","num_speculative_tokens":1}' \
-    --trust-remote-code
+# 1) Pull the NVFP4 body (compressed-tensors, ~26 GB) — fresh clone
+GIT_LFS_SKIP_SMUDGE=1 git clone \
+  https://huggingface.co/AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-NVFP4 \
+  /models/Qwen3.6-27B-AEON-NVFP4
+( cd /models/Qwen3.6-27B-AEON-NVFP4 && git lfs pull )
+
+# 2) Pull the DFlash drafter (z-lab 5-layer, ~3.3 GB) — fresh clone
+GIT_LFS_SKIP_SMUDGE=1 git clone \
+  https://huggingface.co/z-lab/Qwen3.6-27B-DFlash \
+  /models/Qwen3.6-27B-DFlash-drafter
+( cd /models/Qwen3.6-27B-DFlash-drafter && git lfs pull )
+
+# 3) Serve — DFlash drafter + FP8 KV
+docker run -d --name aeon-vllm \
+    --gpus all --ipc=host --shm-size=16g \
+    --net=host \
+    -v /models/Qwen3.6-27B-AEON-NVFP4:/model:ro \
+    -v /models/Qwen3.6-27B-DFlash-drafter:/drafter:ro \
+    --entrypoint vllm \
+    ghcr.io/aeon-7/aeon-vllm-ultimate:latest \
+    serve /model \
+        --served-model-name aeon \
+        --dtype auto \
+        --quantization compressed-tensors \
+        --kv-cache-dtype fp8_e4m3 \
+        --max-model-len 24576 \
+        --max-num-seqs 8 \
+        --max-num-batched-tokens 8192 \
+        --gpu-memory-utilization 0.78 \
+        --enable-chunked-prefill \
+        --enable-prefix-caching \
+        --mamba-block-size 256 \
+        --speculative-config '{"method":"dflash","model":"/drafter","num_speculative_tokens":12}' \
+        --trust-remote-code
 ```
 
 **Notes**:
-- `--kv-cache-dtype nvfp4` activates the PR #44389 path; pair only with **causal** speculators (`mtp`, `qwen3_5_mtp`, `eagle3`, `ngram`, `ngram_gpu`). With DFlash, switch to `--kv-cache-dtype auto` (BF16).
-- `--quantization compressed-tensors` for `AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-NVFP4` (the DFlash-paired body, `format: nvfp4-pack-quantized`); `--quantization modelopt` for the `*-MTP-XS` variants.
-- `--speculative-config` enables MTP (Qwen3.5/3.6) or DFlash drafter (Qwen3.5/3.6 paired with a separate drafter checkpoint — see below).
-- `--mamba-block-size 256` is needed for any hybrid mamba+attention stack (Qwen3.6 included).
+- `--quantization compressed-tensors` for `AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-NVFP4` (the DFlash-paired body, `format: nvfp4-pack-quantized`); `--quantization modelopt` for the `*-MTP-XS` variants (see the MTP variant below).
+- `--kv-cache-dtype fp8_e4m3` — DFlash is **non-causal** and has no NVFP4/FP8-vs-non-causal KV kernel partner that *also* supports NVFP4 on sm_121a; FP8 KV is the working DFlash pairing on this build. NVFP4 KV (`--kv-cache-dtype nvfp4`, PR #44389) pairs only with **causal** speculators (`mtp`, `qwen3_5_mtp`, `eagle3`, `ngram`, `ngram_gpu`) — see the MTP variant.
+- `--speculative-config '{"method":"dflash",...}'` — `method: "dflash"` is the native vLLM speculator (not `"speculators"`).
+- `--mamba-block-size 256` is needed for Qwen3.6's hybrid GatedDeltaNet + attention stack. **Qwen3.6-35B-A3B** does *not* need it (its 8-layer drafter is all-full-attention).
+- `--gpu-memory-utilization 0.78` — **never exceed 0.88 on Spark.** vLLM v0.23.0 defaults to `0.92`, but GB10's unified LPDDR5X pool is shared CPU+GPU, so anything above ~0.88 page-thrashes.
+- If `git clone` leaves LFS pointer files, re-run `git lfs pull` in the model dir. If you instead use `huggingface-cli download` and it stores symlinks into the HF cache `blobs/` dir, vLLM's bind-mount can't follow them — pass `--local-dir-use-symlinks=False` or `cp -L $HF_CACHE/snapshots/<hash>/* /models/Qwen3.6-27B-DFlash-drafter/` so the files are real.
 
-## Variant: DFlash drafter (Qwen3.5 + Qwen3.6)
-
-The drafter is a **separate 3.3 GB BF16 checkpoint** trained on the matching base. Pull it once and bind-mount alongside the main model:
-
-```bash
-# 1. Pull drafter
-huggingface-cli download z-lab/Qwen3.6-27B-DFlash --local-dir /models/Qwen3.6-27B-DFlash-drafter
-
-# 2. CRITICAL — materialize the dir if HF stores symlinks into the cache
-# vLLM bind-mounts can't follow symlinks that point outside the mount.
-HF_CACHE=~/.cache/huggingface/hub/models--z-lab--Qwen3.6-27B-DFlash
-SNAP=$(ls -d $HF_CACHE/snapshots/*/ | head -1)
-cp -L $SNAP/* /models/Qwen3.6-27B-DFlash-drafter/
-
-# 3. Serve with DFlash
-docker run -d --gpus all --ipc=host --shm-size=16g --net=host \
-  -v /models/Qwen3.6-27B-AEON-NVFP4:/model:ro \
-  -v /models/Qwen3.6-27B-DFlash-drafter:/drafter:ro \
-  --entrypoint vllm ghcr.io/aeon-7/aeon-vllm-ultimate:latest \
-  serve /model \
-    --served-model-name aeon \
-    --dtype auto \
-    --quantization compressed-tensors \
-    --kv-cache-dtype auto \
-    --speculative-config '{"method":"dflash","model":"/drafter","num_speculative_tokens":12}' \
-    --max-model-len 24576 --max-num-seqs 8 --max-num-batched-tokens 8192 \
-    --gpu-memory-utilization 0.78 \
-    --enable-chunked-prefill --enable-prefix-caching --mamba-block-size 256 \
-    --trust-remote-code
-```
-
-> ⚠️ **`method: "dflash"`** is the correct value (not `"speculators"`). Use the
-> **default** drafter backend — do **not** add `attention_backend` to the
-> spec-config (the default works for Qwen3.6 on this image). And **leave
-> `--kv-cache-dtype` unset (BF16)** — the non-causal DFlash drafter requires
-> BF16 KV; do not force FP8 or NVFP4 KV with DFlash.
+> ⚠️ **`method: "dflash"`** is the correct value (not `"speculators"`). On this
+> v0.23.0 image the drafter **must** use `"attention_backend": "flash_attn"`
+> for **Gemma-4** targets (the old `flex_attention` workaround crashes at the
+> first request); for Qwen3.6 the default drafter backend works. Use
+> **`--kv-cache-dtype fp8_e4m3`** — the non-causal DFlash drafter cannot pair
+> with NVFP4 KV on sm_121a today.
 >
 > **Why `num_speculative_tokens: 12` and why this image matters for long
 > context**: the z-lab Qwen3.6-27B DFlash drafter is a sliding-window model —
@@ -141,10 +145,41 @@ docker run -d --gpus all --ipc=host --shm-size=16g --net=host \
 > (in `aeon-vllm-ultimate:latest`) runs those layers as proper SWA; earlier
 > images ran them as full attention, so drafting collapsed once context grew
 > past ~2048 tokens. PR #41703 additionally makes `--enable-prefix-caching`
-> corruption-immune with DFlash. Net: long-context drafting holds up;
-> short-context (<2048, one window) is unchanged. n=12 won the n=8–15 sweep
-> (statistically tied short-context, best long-context acceptance) and is the
-> production default.
+> corruption-immune with DFlash. The new PR #43982 port stops the drafter
+> crashing at ≥32 concurrent requests (scales to c=64). Net: long-context
+> drafting holds up and high concurrency is stable; short-context (<2048, one
+> window) is unchanged. n=12 won the n=8–15 sweep (statistically tied
+> short-context, best long-context acceptance) and is the production default.
+
+## Variant: MTP self-speculation + NVFP4 KV (capacity-bound workloads)
+
+For workloads where **KV capacity is the bottleneck** (long context, many
+concurrent streams) on dedicated-VRAM Blackwell, use the modelopt MTP-XS body
+with NVFP4 KV cache — the only path that exercises PR #44389's ~3× KV gain:
+
+```bash
+docker run -d --name aeon-vllm \
+  --gpus all --ipc=host --shm-size=16g --net=host \
+  -v /models/Qwen3.6-27B-AEON-MTP-XS:/model:ro \
+  --entrypoint vllm ghcr.io/aeon-7/aeon-vllm-ultimate:latest \
+  serve /model \
+    --served-model-name aeon \
+    --dtype auto \
+    --quantization modelopt \
+    --kv-cache-dtype nvfp4 \
+    --max-model-len 32768 --max-num-seqs 8 --max-num-batched-tokens 4096 \
+    --gpu-memory-utilization 0.78 \
+    --enable-chunked-prefill --enable-prefix-caching --mamba-block-size 256 \
+    --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}' \
+    --trust-remote-code
+```
+
+> ⚠️ **MTP underperforms DFlash on Spark** (Qwen3.6-27B: DFlash +56% median /
+> +150% peak). Use MTP only when you need NVFP4 KV's ~3× capacity and can
+> accept lower throughput. On **dedicated-VRAM Blackwell** (RTX PRO 6000,
+> B100/B200) MTP is the right choice everywhere; on **Spark** prefer the DFlash
+> standard recipe above. `--kv-cache-dtype nvfp4` pairs only with causal
+> speculators (`mtp`, `qwen3_5_mtp`, `eagle3`, `ngram`, `ngram_gpu`).
 
 ## Variant: TurboQuant K8V4 4-bit KV (extreme memory budget)
 
@@ -181,7 +216,7 @@ curl -sLO https://raw.githubusercontent.com/AEON-7/vllm-ultimate-dgx-spark/main/
 python3 bench_vllm.py \
   --base http://localhost:8000 \
   --model aeon \
-  --label "MTP+NVFP4-KV" \
+  --label "DFlash+FP8-KV" \
   --single-rounds 5 \
   --concurrent-streams 4 \
   --concurrent-rounds 3 \
@@ -195,9 +230,10 @@ Compare your numbers to the table in the README under "Benchmarks". A ±10% devi
 | Symptom | Diagnosis | Fix |
 |---|---|---|
 | `cuda_optional_import` warns about `_C_stable_libtorch` | Expected on sm_121 — MXFP8 SM100-only kernels are lazy-loaded | Ignore, model loads normally |
-| `RuntimeError: mat1 and mat2 shapes` on Gemma-4-12B | Upstream PR #44389 multimodal fallback bug | Use `ghcr.io/aeon-7/aeon-gemma-4-26b-a4b-dflash:latest` instead (vLLM 0.20.1) |
-| `quantization 'NVFP4_SVD' not recognized` | vLLM modelopt deserializer not yet updated | Load with `modelopt+transformers` directly, or use older AEON-7 image |
-| `embed_vision.embedding_projection.weight` missing | PR #44389 `exclude_modules` wildcard bug | Same as above — use older image for multimodal Gemma-4 |
+| DFlash drafter crashes / `block_table must have shape …` at ≥32 concurrent requests | Pre-v0.23.0 image (padded-vs-unpadded KV block-table) | Upgrade to `:latest` (= `:2026-06-18-v0.23.0-dflashfix`) — carries the PR #43982 port; scales to c=64 |
+| `RuntimeError: mat1 and mat2 shapes` on Gemma-4-12B | **Model-side** multimodal-fused QKV not handled by the Transformers fallback — fails on any vLLM, not container-specific | No container fix; use the correctly-quantized `Gemma-4-26B-A4B-it-Uncensored-NVFP4` for production |
+| `quantization 'NVFP4_SVD' not recognized` | vLLM modelopt deserializer doesn't yet know ModelOpt's SVD+low-rank algo (model-side) | Re-quantize with a supported algo, or load via `modelopt+transformers` directly |
+| `embed_vision.embedding_projection.weight` missing | **Badly-quantized variant only** (vision embedder was quantized) — model-side, fails on any vLLM | Use the correctly-quantized `Gemma-4-26B-A4B-it-Uncensored-NVFP4` (vision embedder excluded as BF16) |
 | `gpu-memory-utilization > 0.88` thrashes | DGX Spark unified memory limit | Cap at 0.88, drop `--max-model-len`, or enable TurboQuant K8V4 |
 | `torch.compile takes 30-60s on first request` | Expected on first cold launch | Subsequent restarts are cached; ignore |
 
@@ -224,7 +260,7 @@ docker start aeon-vllm
 ## License + provenance
 
 - vLLM Apache-2.0, PyTorch BSD-3-Clause, TurboQuant Apache-2.0, AEON patches MIT.
-- Source: [`lesj0610/vllm@lesj/triton-nvfp4-kv-fork-20260602`](https://github.com/lesj0610/vllm/tree/lesj/triton-nvfp4-kv-fork-20260602) commit `e8c77b85`.
+- Source: **vLLM v0.23.0 compiled from source for sm_121a** (`TORCH_CUDA_ARCH_LIST=12.1a`) as a 3-way merge that preserves the AEON spec-decode tree; carries open upstream PRs #44389 (Triton NVFP4 KV), #40898 (DFlash SWA), #41703 (Gemma-4 DFlash prefix-cache-safe) plus the in-tree DFlash high-concurrency fix (port of PR #43982). The earlier `:2026-06-04-pr44389` build pinned [`lesj0610/vllm@lesj/triton-nvfp4-kv-fork-20260602`](https://github.com/lesj0610/vllm/tree/lesj/triton-nvfp4-kv-fork-20260602) commit `e8c77b85` (historical).
 - Patches + Dockerfile: [`AEON-7/vllm-ultimate-dgx-spark`](https://github.com/AEON-7/vllm-ultimate-dgx-spark).
 
 ## Support the work
