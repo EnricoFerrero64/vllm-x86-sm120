@@ -17,7 +17,7 @@ Built on **vLLM v0.23.0 compiled from source for sm_121a**, merged with the AEON
 | **vLLM** | 0.23.0 + sm_121a build, AEON spec-decode 3-way merge | Built from source for GB10; carries PR #44389 (Triton NVFP4 KV) + #40898 (DFlash SWA) + #41703 (prefix-cache corruption) + #43982-port (DFlash high-concurrency fix, new 2026-06-18) |
 | **PyTorch** | 2.11.0+cu130 | CUDA 13.0 with sm_121a (DGX Spark / GB10) compute capability |
 | **transformers** | 5.10.0.dev0 (HEAD) | Recognizes `gemma4_unified`, `qwen3_5`, all bleeding-edge model classes |
-| **flashinfer** | 0.6.8.post1 | NVFP4 GEMM kernels, sliding-window attention, MLA, custom attention |
+| **flashinfer** | 0.6.12 | NVFP4 GEMM kernels, sliding-window attention, MLA, custom attention |
 | **TurboQuant** | 0.2.0 (AEON-7 fork) | CUDA-graph-safe QJL — 4-bit KV compression on top of vLLM's native KV cache |
 | **modelopt** | available via pip if needed | Quantization framework (not bundled — image stays small for serving) |
 
@@ -29,7 +29,7 @@ Numbers are measured on **DGX Spark GB10 (sm_121a)** with DFlash speculative dec
 
 ### Gemma-4-26B-A4B-it-Uncensored (NVFP4)
 
-<p align="center"><img src="assets/perf/gemma26b_concurrency.svg" width="100%" alt="Gemma-4-26B-A4B aggregate throughput scaling from 1 to 64 concurrent requests on aeon-vllm-ultimate:latest — up to 1937 tok/s at c=64"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/AEON-7/vllm-ultimate-dgx-spark/main/assets/perf/gemma26b_concurrency.svg" width="100%" alt="Gemma-4-26B-A4B aggregate throughput scaling from 1 to 64 concurrent requests on aeon-vllm-ultimate:latest — up to 1937 tok/s at c=64"></p>
 
 Single-stream (c=1), by category, on `aeon-vllm-ultimate:latest`:
 
@@ -44,9 +44,17 @@ Single-stream (c=1), by category, on `aeon-vllm-ultimate:latest`:
 
 Long-context hold (DFlash acceptance does **not** collapse as histories grow): at **~16k tokens** (c=1) Coding draft acceptance is **58.7%** (128 tok/s decode); at **~33k tokens** it holds **46.7%** (93 tok/s decode). That long-context acceptance hold is the SWA-fix win (PR #40898) — earlier images collapsed past ~2k tokens.
 
+<p align="center"><img src="https://raw.githubusercontent.com/AEON-7/vllm-ultimate-dgx-spark/main/assets/perf/gemma26b_longcontext.svg" width="100%" alt="Gemma-4-26B-A4B DFlash draft acceptance and decode throughput holding flat from short prompts to ~33k-token histories on aeon-vllm-ultimate:latest"></p>
+
+Stock-vs-optimized single-stream contrast on this build:
+
+<p align="center"><img src="https://raw.githubusercontent.com/AEON-7/vllm-ultimate-dgx-spark/main/assets/perf/gemma26b_stock_vs_optimized.svg" width="100%" alt="Gemma-4-26B-A4B stock vanilla vLLM vs aeon-vllm-ultimate:latest single-stream decode throughput by category"></p>
+
+> **Provisional contrast.** The stock / un-optimized bars are from **stock vanilla vLLM** (default settings, no DFlash, no DGX-Spark / sm_121a optimizations) and are **provisional, pending a fresh fully-vanilla re-bench** on the current v0.23.0 version.
+
 ### Qwen3.6-35B-A3B-heretic (NVFP4)
 
-<p align="center"><img src="assets/perf/qwen35b_concurrency.svg" width="100%" alt="Qwen3.6-35B-A3B aggregate throughput scaling from 1 to 64 concurrent requests on aeon-vllm-ultimate:latest — up to 740 tok/s at c=64"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/AEON-7/vllm-ultimate-dgx-spark/main/assets/perf/qwen35b_concurrency.svg" width="100%" alt="Qwen3.6-35B-A3B aggregate throughput scaling from 1 to 64 concurrent requests on aeon-vllm-ultimate:latest — up to 740 tok/s at c=64"></p>
 
 Single-stream (c=1), by category:
 
@@ -61,9 +69,11 @@ Single-stream (c=1), by category:
 
 Long-context hold: Coding draft acceptance is **40.8%** at **~16k** (90.8 tok/s decode) and **42.8%** at **~33k** (79.3 tok/s decode) — the A3B drafter holds acceptance flat across context.
 
+<p align="center"><img src="https://raw.githubusercontent.com/AEON-7/vllm-ultimate-dgx-spark/main/assets/perf/qwen35b_longcontext.svg" width="100%" alt="Qwen3.6-35B-A3B DFlash draft acceptance and decode throughput holding flat from short prompts to ~33k-token histories on aeon-vllm-ultimate:latest"></p>
+
 ### Qwen3.6-27B-AEON-Ultimate (NVFP4 MTP-XS body + DFlash n=12)
 
-<p align="center"><img src="assets/perf/qwen27b_concurrency.svg" width="100%" alt="Qwen3.6-27B aggregate throughput scaling from 1 to 64 concurrent requests on aeon-vllm-ultimate:latest — up to 344 tok/s at c=64"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/AEON-7/vllm-ultimate-dgx-spark/main/assets/perf/qwen27b_concurrency.svg" width="100%" alt="Qwen3.6-27B aggregate throughput scaling from 1 to 64 concurrent requests on aeon-vllm-ultimate:latest — up to 344 tok/s at c=64"></p>
 
 Single-stream (c=1), by category:
 
@@ -76,7 +86,13 @@ Single-stream (c=1), by category:
 | Natural language | **38.3** | 137 ms | 26.1 ms | 248 tok/s | 31.3% |
 | Extraction / JSON | **44.2** | 246 ms | 22.6 ms | 195 tok/s | 37.2% |
 
-vs a **stock vanilla `vllm/vllm-openai:nightly` baseline of ~10.5 tok/s** (no DFlash, no sm_121a optimizations) → roughly **4–5× faster single-stream decode**. Long-context hold: Coding draft acceptance is **49.5%** at **~16k** and **29.1%** at **~33k** — long histories stay drafted on the SWA-fixed drafter.
+vs a **stock vanilla `vllm/vllm-openai:nightly` baseline of ~10.5 tok/s** (no DFlash, no sm_121a optimizations) → optimized hits **~38–56 tok/s by category ≈ 4–5× single-stream** decode.
+
+<p align="center"><img src="https://raw.githubusercontent.com/AEON-7/vllm-ultimate-dgx-spark/main/assets/perf/qwen27b_stock_vs_optimized.svg" width="100%" alt="Qwen3.6-27B stock vanilla vLLM (~10.5 tok/s) vs aeon-vllm-ultimate:latest single-stream decode throughput by category"></p>
+
+Long-context hold: Coding draft acceptance is **49.5%** at **~16k** and **29.1%** at **~33k** — long histories stay drafted on the SWA-fixed drafter.
+
+<p align="center"><img src="https://raw.githubusercontent.com/AEON-7/vllm-ultimate-dgx-spark/main/assets/perf/qwen27b_longcontext.svg" width="100%" alt="Qwen3.6-27B DFlash draft acceptance and decode throughput across short-to-~33k-token histories on aeon-vllm-ultimate:latest"></p>
 
 > **About the stock baseline:** the "stock / un-optimized" comparison figure is from **stock vanilla vLLM** (default settings, no DFlash, no DGX-Spark / sm_121a optimizations — `vllm/vllm-openai:nightly` eager). It is **provisional and will be refreshed** once a fresh fully-vanilla benchmark completes on the current version. The optimized figures above are measured on the new `aeon-vllm-ultimate:latest` (vLLM 0.23.0) build. There is no published vanilla baseline for the 35B-A3B yet (pending re-bench).
 
@@ -118,12 +134,11 @@ Not activated by default. Pass `--kv-cache-dtype nvfp4` to opt in.
 
 ### 🛠️ AEON DGX Spark patches (sm_121a runtime fixes)
 
-The container ships with our 4 idempotent runtime patches that ensure correctness on GB10 hardware until upstream fixes land:
+The container ships with our 3 idempotent runtime patches that ensure correctness on GB10 hardware until upstream fixes land:
 
 | Patch | What it fixes |
 |---|---|
 | **patch_cuda_optional_import** | Wraps `import vllm._C_stable_libtorch` in `RTLD_LAZY` so the SM100-only `mxfp4_experts_quant` and `silu_and_mul_mxfp4_experts_quant` symbols are tolerated as unresolved until first call (they never fire on sm_121a workloads) |
-| **patch_kv_cache_utils** | Filters `None` block_size values out of `min()` calls in `v1/core/kv_cache_utils.py`, `v1/engine/core.py`, `v1/worker/gpu_model_runner.py` — fixes hybrid linear/full attention models (Qwen3.5/3.6, Nemotron-Omni) that crash with `TypeError: '<' not supported between NoneType and NoneType` |
 | **patch_cudagraph_align** | Drops the `cudagraph_mode==FULL`-only gate on the spec-decode capture-size alignment filter in `config/compilation.py` so PIECEWISE mode also rounds capture sizes to multiples of `(1 + num_speculative_tokens)` — eliminates `cudaErrorIllegalAddress` mid-decode on partial-acceptance steps |
 
 All patches are idempotent — they no-op when upstream merges the equivalent fix.
@@ -167,7 +182,7 @@ docker pull ghcr.io/aeon-7/aeon-vllm-ultimate:2026-06-11-pr41703
 
 ### Recipe A — DGX Spark, DFlash drafter + FP8 KV (recommended for daily-driver)
 
-This is the **measured-best config** for DGX Spark per the AEON-7 Qwen3.6 routing memo: **DFlash drafter beats MTP-method by +56 % median / +150 % peak** on Spark's unified-memory GB10.
+This is the **measured-best config** for DGX Spark per the AEON-7 Qwen3.6 routing memo: on the **Qwen3.6-27B MTP-XS body**, the **DFlash drafter beats the MTP-method by +56 % median / +150 % peak** on Spark's unified-memory GB10 (measured 2026-04-28). Note this is a 27B-XS-body result — **Qwen3.6-35B-A3B is at parity** (no DFlash win; its 8-layer all-full-attention drafter draws even with MTP-style decoding).
 
 > ⚠️ **DFlash + NVFP4 KV is not yet compatible on sm_121a (still true on the v0.23.0 build).** The DFlash drafter uses non-causal attention (parallel candidate generation), and none of the currently-built backends pair non-causal with NVFP4 KV on Spark:
 > - `FLASH_ATTN` — doesn't support NVFP4 KV
@@ -224,6 +239,7 @@ docker run -d --name aeon-vllm \
 - `--speculative-config '{"method":"dflash",...}'` — `method: "dflash"` is the native vLLM speculator (not `"speculators"`).
 - `--max-num-batched-tokens 8192` — must accommodate `num_speculative_tokens × max_num_seqs` plus headroom (vLLM warns if too low).
 - `--mamba-block-size 256` — needed for Qwen3.6's hybrid GatedDeltaNet + attention stack.
+- `--gpu-memory-utilization` — **keep this ≤ 0.88 on DGX Spark.** vLLM v0.23.0 defaults to `0.92`, but GB10's unified LPDDR5X pool is shared between CPU and GPU, so anything above ~0.88 page-thrashes. The recipes here use `0.78`/`0.68`; never set it higher than `0.88`.
 
 > 💡 **Drafter materialization note.** vLLM bind-mounts the drafter dir but can't follow symlinks that point **outside** the mount (e.g. into the HF cache `blobs/` dir). After `huggingface-cli download`, either pass `--local-dir-use-symlinks=False` *or* `cp -L $HF_CACHE/snapshots/<hash>/* /models/Qwen3.6-27B-DFlash-drafter/` so the files are real, not symlinks. This pitfall cost us 4 startup failures.
 
@@ -248,7 +264,7 @@ docker run -d --name aeon-vllm \
         --trust-remote-code
 ```
 
-> ⚠️ **MTP throughput is lower than DFlash on Spark.** Measured 2026-04-28: DFlash beats MTP by **+56 % median / +150 % peak** with the same XS body. Use MTP only when you need NVFP4 KV's ~3× capacity (long contexts or higher batch sizes) **and** can accept the lower throughput. For pure throughput on Spark, use Recipe A. For dedicated-VRAM Blackwell (RTX PRO 6000, B100/B200), MTP is the right choice everywhere.
+> ⚠️ **MTP throughput is lower than DFlash on Spark (Qwen3.6-27B).** Measured 2026-04-28 on the **Qwen3.6-27B MTP-XS body**: DFlash beats MTP by **+56 % median / +150 % peak** with the same XS body. (On **Qwen3.6-35B-A3B** the two are at **parity** — its 8-layer all-full-attention drafter has no DFlash win.) Use MTP only when you need NVFP4 KV's ~3× capacity (long contexts or higher batch sizes) **and** can accept the lower throughput. For pure throughput on Spark, use Recipe A. For dedicated-VRAM Blackwell (RTX PRO 6000, B100/B200), MTP is the right choice everywhere.
 
 ### Recipe C — TurboQuant K8V4 (4-bit KV, extreme capacity)
 
@@ -440,7 +456,7 @@ ValueError: ... kv_cache_dtype=fp8_e4m3, ..., use_non_causal=True. Reasons:
   TURBOQUANT: [kv_cache_dtype not supported, non-causal attention not supported]
 ```
 
-This is a **regression vs the v3 production image** (vLLM 0.20.0), which had a FLASHINFER kernel variant that handled non-causal + FP8 KV. NVFP4 KV will land for DFlash once either (a) the Triton backend gains a non-causal kernel or (b) FLASHINFER's non-causal+FP8 path returns. For FP8-KV-with-DFlash today, fall back to `ghcr.io/aeon-7/vllm-aeon-ultimate-dflash:qwen36-v3`.
+This is a **current-state limitation of the v0.23.0 build on sm_121a**: DFlash's non-causal (parallel candidate) attention has no FP8/NVFP4 KV kernel partner on GB10 today — `FLASH_ATTN` is BF16-KV only, and both `FLASHINFER` and `TRITON_ATTN` dropped their non-causal path in PR #44389's refactor (FlashInfer's NVFP4 KV also needs SM100). NVFP4/FP8 KV will pair with DFlash once either (a) the Triton backend gains a non-causal kernel or (b) FLASHINFER's non-causal + FP8 path returns. Until then, run DFlash with **`--kv-cache-dtype auto`** (BF16), or use a causal speculator (Recipe B) for NVFP4 KV.
 
 **Workaround for NVFP4 KV**: use a **causal** speculator (`mtp`, `qwen3_5_mtp`, `eagle3`, `ngram`, `ngram_gpu`) — see Recipe B. The Triton NVFP4-KV path supports those.
 
@@ -452,9 +468,11 @@ This is a **regression vs the v3 production image** (vLLM 0.20.0), which had a F
 | `Gemma-4-12B-AEON-Abliterated-K4-BF16` | vLLM's `TransformersMultiModalForCausalLM` fallback hits a shape mismatch on `Gemma4UnifiedForConditionalGeneration`. `RuntimeError: mat1 and mat2 shapes cannot be multiplied (2048x4096 and 8192x3840)` in a linear projection during graph capture. Suspect a multimodal-fused QKV layer not handled by the fallback path. |
 | `Gemma-4-12B-AEON-Abliterated-K4-NVFP4-SVDQuant` | vLLM only knows `NVFP4 / NVFP4_FP8_MHA / W4A16_NVFP4 / MXFP8 / MIXED_PRECISION`. Our model's `quant_algo=NVFP4_SVD` (ModelOpt's newer SVD+low-rank variant) isn't yet recognized. Awaiting a deserializer PR in vLLM's `model_executor.layers.quantization.modelopt`. |
 
-### Gemma-4-26B-A4B-NVFP4
+### Gemma-4-26B-A4B-NVFP4 — *badly-quantized vision-embedder variant only*
 
-vLLM creates the `embed_vision.embedding_projection` as a quantized `ReplicatedLinear`, but the checkpoint has only the unquantized `embed_vision.embedding_projection.weight` (because we excluded `embed_vision*` during quantization). Weight-loading mismatch. Likely an `exclude_modules` wildcard handling bug in PR #44389's refactor.
+> This entry is specific to the **variant whose vision embedder was quantized**. The **correctly-quantized** [`Gemma-4-26B-A4B-it-Uncensored-NVFP4`](https://huggingface.co/AEON-7/Gemma-4-26B-A4B-it-Uncensored-NVFP4) (vision embedder excluded as BF16) is **fleet-benchmarked and works** on the v0.23.0 `:latest` image — see the [fleet section](#v0230-fleet-benchmarks--one-image-three-models).
+
+For the badly-quantized variant, vLLM creates the `embed_vision.embedding_projection` as a quantized `ReplicatedLinear`, but the checkpoint has only the unquantized `embed_vision.embedding_projection.weight` (because `embed_vision*` was excluded during quantization). Weight-loading mismatch. Likely an `exclude_modules` wildcard handling bug in PR #44389's refactor.
 
 ### For Gemma-4 production today
 
