@@ -198,6 +198,29 @@ from vllm import LLM, SamplingParams; \
 from vllm.config import VllmConfig; \
 print('Build complete — sm_120 x86_64 ready')"
 
+# ── MUTABLE LAYER 14: strip + slim ───────────────────────────────────────────
+# Must run in builder BEFORE the COPY to runtime stage — stripping after COPY
+# would keep both the large (pre-strip) and small (post-strip) versions in
+# separate layers, actually increasing total size.
+#
+# strip --strip-unneeded: removes debug symbols, keeps exported symbols
+# (safe for dlopen — all dynamic linking symbols are preserved).
+# Saves 3-5 GB from torch .so files alone.
+#
+# torch/include/: C++ headers needed only for extension compilation (done above).
+# torch/test/:   PyTorch test suite, not needed at runtime.
+# *.pyi:         IDE type stubs, not needed at runtime.
+# __pycache__:   Regenerated on first import; stale across Python minor versions.
+RUN find /usr/local/lib/python3.12/ -name "*.so*" -type f \
+        -exec strip --strip-unneeded {} + 2>/dev/null || true && \
+    rm -rf \
+        /usr/local/lib/python3.12/dist-packages/torch/include/ \
+        /usr/local/lib/python3.12/dist-packages/torch/test/ && \
+    find /usr/local/lib/python3.12/ -name "*.pyi" -delete 2>/dev/null || true && \
+    find /usr/local/lib/python3.12/ -type d -name "__pycache__" \
+        -exec rm -rf {} + 2>/dev/null || true && \
+    echo "[slim] done — stripped .so files and removed build-only artifacts"
+
 # ══════════════════════════════════════════════════════════════════════════════
 # STAGE 2: runtime — lean image pushed to GHCR (~15-18 GB vs ~40 GB)
 #
