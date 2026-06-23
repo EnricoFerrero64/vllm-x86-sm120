@@ -141,9 +141,9 @@ services:
       retries: 5
       start_period: 120s
 
-    # 16GB shm for NCCL TP=2 inter-GPU tensor buffers.
-    # 2GB is insufficient under sustained TP=2 load with 27B model.
-    shm_size: "16gb"
+    # 8GB shm for NCCL TP=2 inter-GPU tensor buffers.
+    # 16GB was causing OOM on systems with ≤64 GB RAM at container startup.
+    shm_size: "8gb"
     ulimits:
       memlock: -1
       stack: 67108864

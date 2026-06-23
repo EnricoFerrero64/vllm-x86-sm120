@@ -83,7 +83,6 @@ jobs:
           tags: |
             type=raw,value=sm120
             type=sha,prefix=sha-,format=short
-            type=ref,event=branch
 
       - name: Build and push image
         uses: docker/build-push-action@v6

@@ -9,27 +9,33 @@
 #   - vLLM source cloned from lesj0610/vllm inside Docker (pinned commit)
 #   - PyTorch 2.11.0+cu130 installed from official whl index
 #   - flashinfer 0.6.12 from flashinfer.ai whl (falls back to source build)
+#   - Multi-stage build: builder (devel, not pushed) + runtime (~15 GB final image)
 #
 # LAYER STRUCTURE — read before editing:
 #
-#   ┌─ STABLE (changing = full 2h rebuild) ──────────────────────────────────┐
-#   │  1. apt + python3.12 + pip                                             │
-#   │  2. libnvrtc.so symlink                                                │
-#   │  3. torch==2.11.0+cu130                                                │
-#   │  4. git clone vllm @e4a9fbee (pinned)                                  │
-#   │  5. pip install . ← THE EXPENSIVE LAYER (~2h CUDA compilation)        │
-#   └────────────────────────────────────────────────────────────────────────┘
-#   ┌─ MUTABLE (editing = minutes, not hours) ───────────────────────────────┐
-#   │  6. pip dep fixes: setuptools + torch re-pin + cuda-python             │
-#   │  7. flashinfer                                                         │
-#   │  8. modelopt                                                           │
-#   │  9. patches (COPY + apply)                                             │
-#   │ 10. scipy + turboquant                                                 │
-#   │ 11. transformers (most likely to update)                               │
-#   │ 12. humming-stub                                                       │
-#   │ 13. verify + smoke test                                                │
-#   │ 14. cleanup                                                            │
-#   └────────────────────────────────────────────────────────────────────────┘
+#   ┌─ STAGE 1: builder (NOT pushed to GHCR) ───────────────────────────────────┐
+#   │  STABLE (changing = full 2h rebuild):                                     │
+#   │  1. apt + python3.12 + pip                                                │
+#   │  2. libnvrtc.so symlink                                                   │
+#   │  3. torch==2.11.0+cu130                                                   │
+#   │  4. git clone vllm @e4a9fbee (pinned)                                     │
+#   │  5. pip install . ← THE EXPENSIVE LAYER (~2h CUDA compilation)           │
+#   │  MUTABLE (editing = minutes, not hours):                                  │
+#   │  6. pip dep fixes: setuptools + torch re-pin + cuda-python                │
+#   │  7. flashinfer                                                             │
+#   │  8. modelopt                                                               │
+#   │  9. patches (COPY + apply)                                                │
+#   │ 10. scipy + turboquant                                                    │
+#   │ 11. transformers (most likely to update)                                  │
+#   │ 12. humming-stub                                                           │
+#   │ 13. verify + smoke test                                                   │
+#   └────────────────────────────────────────────────────────────────────────────┘
+#   ┌─ STAGE 2: runtime (~15-18 GB — this is what gets pushed to GHCR) ─────────┐
+#   │  - cuda:13.0.3-runtime base (no nvcc, no headers, no static libs)        │
+#   │  - Python 3.12 + CUDA runtime math libs (apt)                            │
+#   │  - NCCL runtime (copied from builder)                                     │
+#   │  - site-packages + executables (copied from builder)                      │
+#   └────────────────────────────────────────────────────────────────────────────┘
 #
 # NVFP4 KV cache on sm_120:
 #   - Triton path (PR #44389): works with CAUSAL speculators (mtp/eagle3/ngram)
@@ -37,7 +43,11 @@
 #   - DFlash speculator: must use --kv-cache-dtype auto (BF16), not nvfp4
 #   - AEON Qwen3.6-27B-MTP-XS uses MTP → --kv-cache-dtype nvfp4 is enabled
 
-FROM nvcr.io/nvidia/cuda:13.0.3-devel-ubuntu22.04
+# ══════════════════════════════════════════════════════════════════════════════
+# STAGE 1: builder — full devel environment for CUDA compilation
+# This stage is large (~40 GB) but is NOT pushed as the final image.
+# ══════════════════════════════════════════════════════════════════════════════
+FROM nvcr.io/nvidia/cuda:13.0.3-devel-ubuntu22.04 AS builder
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -188,8 +198,66 @@ from vllm import LLM, SamplingParams; \
 from vllm.config import VllmConfig; \
 print('Build complete — sm_120 x86_64 ready')"
 
-# ── LAYER 14: cleanup ─────────────────────────────────────────────────────────
-RUN rm -rf /build /aeon-patches /root/.cache/pip /tmp/*.log
+# ══════════════════════════════════════════════════════════════════════════════
+# STAGE 2: runtime — lean image pushed to GHCR (~15-18 GB vs ~40 GB)
+#
+# Strips: nvcc, CUDA headers, static libs, vLLM source tree, build artifacts.
+# Keeps:  Python 3.12, pip packages (vllm, torch, flashinfer, …), CUDA runtime.
+# ══════════════════════════════════════════════════════════════════════════════
+FROM nvcr.io/nvidia/cuda:13.0.3-runtime-ubuntu22.04
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV SETUPTOOLS_SCM_PRETEND_VERSION="0.23.0+aeon.x86.sm120"
+ENV SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM="0.23.0+aeon.x86.sm120"
+
+# Python 3.12 + CUDA runtime math libs needed by PyTorch/Triton/vLLM at runtime.
+# cuda-nvrtc-13-0      → libnvrtc.so       (Triton JIT kernel compilation)
+# libcublas-13-0       → libcublas.so       (PyTorch matmul, attention)
+# libcusparse-13-0     → libcusparse.so     (sparse ops)
+# libcusolver-13-0     → libcusolver.so     (linear algebra)
+# libcufft-13-0        → libcufft.so        (FFT ops)
+# libcurand-13-0       → libcurand.so       (random sampling)
+# libnvjitlink-13-0    → libnvjitlink.so    (PTX JIT linking for Triton)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends software-properties-common && \
+    add-apt-repository -y ppa:deadsnakes/ppa && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        python3.12 \
+        git ca-certificates curl \
+        cuda-nvrtc-13-0 \
+        libcublas-13-0 \
+        libcusparse-13-0 \
+        libcusolver-13-0 \
+        libcufft-13-0 \
+        libcurand-13-0 \
+        libnvjitlink-13-0 && \
+    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1 && \
+    update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 && \
+    curl -sS https://bootstrap.pypa.io/get-pip.py | python3.12 && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# NCCL runtime — needed for TP=2 tensor-parallel over PCIe.
+# Copied from builder to avoid needing the NVIDIA ML apt repo.
+COPY --from=builder /usr/lib/x86_64-linux-gnu/libnccl.so* /usr/lib/x86_64-linux-gnu/
+
+# libnvrtc.so versionless symlink — Triton JIT expects it without version suffix.
+RUN CUDA_LIB=/usr/local/cuda-13.0/targets/x86_64-linux/lib && \
+    if [ ! -f "$CUDA_LIB/libnvrtc.so" ] && ls "$CUDA_LIB/libnvrtc.so.13"* &>/dev/null; then \
+        ln -sf "$(ls $CUDA_LIB/libnvrtc.so.13* | head -1)" "$CUDA_LIB/libnvrtc.so"; \
+    fi
+
+# Copy all pip-installed packages and console scripts from builder.
+# /usr/local/lib/python3.12/ contains vllm, torch, flashinfer, modelopt, …
+# /usr/local/bin/ contains pip, uvicorn, vllm CLI, and other entry points.
+COPY --from=builder /usr/local/lib/python3.12/ /usr/local/lib/python3.12/
+COPY --from=builder /usr/local/bin/ /usr/local/bin/
+
+# Refresh shared library cache after NCCL copy.
+RUN ldconfig
 
 EXPOSE 8000
 ENTRYPOINT ["/bin/bash"]
