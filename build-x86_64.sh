@@ -59,6 +59,26 @@ for f in "$DOCKERFILE" patches/patch_cuda_optional_import.py patches/patch_kv_ca
     fi
 done
 
+# Fail-fast: verify GHCR auth before starting a 2h build.
+# Probes the registry with a manifest inspect; distinguishes "unauthorized" from
+# "not found" (buildcache may not exist yet on first push — that's fine).
+if $PUSH_CACHE; then
+    echo "[INFO] Verifying GHCR push access before build..."
+    PROBE_OUT=$(docker buildx imagetools inspect \
+        "ghcr.io/enricoferrero64/aeon-vllm-x86:buildcache" 2>&1 || true)
+    if echo "$PROBE_OUT" | grep -qiE "unauthorized|insufficient_scope|access denied|authentication required"; then
+        echo ""
+        echo "[ERROR] Not authenticated to ghcr.io — would fail after compilation."
+        echo "        Log in first, then retry:"
+        echo ""
+        echo "  echo YOUR_GITHUB_TOKEN | docker login ghcr.io -u enricoferrero64 --password-stdin"
+        echo ""
+        echo "  (Token needs scope: write:packages  —  Settings → Developer Settings → PAT)"
+        exit 1
+    fi
+    echo "[INFO] GHCR auth OK — proceeding with build"
+fi
+
 # Use docker buildx so we can target linux/amd64 explicitly and use registry cache
 BUILDER=$(docker buildx ls | grep -E '^aeon-builder' | awk '{print $1}' || true)
 if [[ -z "$BUILDER" ]]; then

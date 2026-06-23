@@ -20,6 +20,12 @@ on:
         type: boolean
         default: false
 
+# Cancel any in-progress run on the same branch when a new push arrives.
+# Avoids burning 5h of runner time on a stale commit.
+concurrency:
+  group: build-x86-${{ github.ref }}
+  cancel-in-progress: true
+
 # Minimal token scope: read repo, write packages (push to ghcr.io)
 permissions:
   contents: read
