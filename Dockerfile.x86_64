@@ -212,6 +212,10 @@ print('Build complete — sm_120 x86_64 ready')"
 # *.pyi:         IDE type stubs, not needed at runtime.
 # __pycache__:   Regenerated on first import; stale across Python minor versions.
 RUN find /usr/local/lib/python3.12/ -name "*.so*" -type f \
+        ! -path "*/numpy/*" \
+        ! -path "*/scipy/*" \
+        ! -name "libopenblas*" \
+        ! -name "libscipy_openblas*" \
         -exec strip --strip-unneeded {} + 2>/dev/null || true && \
     rm -rf \
         /usr/local/lib/python3.12/dist-packages/torch/include/ \
