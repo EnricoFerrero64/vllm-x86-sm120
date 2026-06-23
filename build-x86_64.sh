@@ -70,12 +70,13 @@ fi
 BUILD_ARGS=(
     --platform linux/amd64
     --file "$DOCKERFILE"
-    --tag "$IMAGE_LOCAL"
     --build-arg BUILDKIT_INLINE_CACHE=1
     --progress plain
 )
 
 if $PUSH_CACHE; then
+    # Push mode: only GHCR tags — no local tag (would default to Docker Hub and fail).
+    # The local IMAGE_LOCAL name is NOT added here intentionally.
     BUILD_ARGS+=(
         --tag "$GHCR_IMAGE"
         # Pull warm layers from GHCR if available (speeds up incremental rebuilds)
@@ -85,8 +86,12 @@ if $PUSH_CACHE; then
         --push
     )
 else
-    # Load into local Docker daemon (--push and --load are mutually exclusive)
-    BUILD_ARGS+=(--load)
+    # Local-only mode: load into local Docker daemon with the short local tag.
+    # (--push and --load are mutually exclusive in buildx)
+    BUILD_ARGS+=(
+        --tag "$IMAGE_LOCAL"
+        --load
+    )
 fi
 
 if $NO_CACHE; then
