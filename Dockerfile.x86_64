@@ -211,11 +211,13 @@ print('Build complete — sm_120 x86_64 ready')"
 # torch/test/:   PyTorch test suite, not needed at runtime.
 # *.pyi:         IDE type stubs, not needed at runtime.
 # __pycache__:   Regenerated on first import; stale across Python minor versions.
-RUN find /usr/local/lib/python3.12/ -name "*.so*" -type f \
-        ! -path "*/numpy/*" \
-        ! -path "*/scipy/*" \
-        ! -name "libopenblas*" \
-        ! -name "libscipy_openblas*" \
+# Strip only .so files we compiled ourselves — safer than stripping pre-built
+# wheels from third parties (torch/lib/, numpy, scipy all use non-standard ELF
+# layouts that strip --strip-unneeded can corrupt).
+# vllm + flashinfer are compiled in this build and are standard ELF C extensions.
+RUN find /usr/local/lib/python3.12/dist-packages/vllm/ -name "*.so*" -type f \
+        -exec strip --strip-unneeded {} + 2>/dev/null || true && \
+    find /usr/local/lib/python3.12/dist-packages/flashinfer/ -name "*.so*" -type f \
         -exec strip --strip-unneeded {} + 2>/dev/null || true && \
     rm -rf \
         /usr/local/lib/python3.12/dist-packages/torch/include/ \
