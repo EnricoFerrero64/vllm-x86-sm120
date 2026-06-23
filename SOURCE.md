@@ -4,7 +4,8 @@ Build was against:
 
 - **Repo**: `lesj0610/vllm`
 - **Branch**: `lesj/triton-nvfp4-kv-fork-20260602`
-- **Commit**: `e8c77b85`
+- **Commit**: `e4a9fbee08b14a49470cfcf6a87dd0b2bddb6345`
+- **Previous pin**: `e8c77b85` (branch was rebased/updated 2026-06-23; old commit no longer in history)
 - **Upstream PR**: [vllm-project/vllm#44389](https://github.com/vllm-project/vllm/pull/44389) — Triton software NVFP4 KV cache (~3× capacity)
 
 To reproduce the build:
