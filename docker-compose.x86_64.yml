@@ -1,0 +1,74 @@
+# Jarvis — AEON vLLM x86_64 + sm_120 compose
+# Replaces /boot/config/plugins/compose.manager/projects/aeon_vllm/docker-compose.yml
+#
+# Build the image first on the Unraid host:
+#   cd /path/to/vllm-x86-sm120 && ./build-x86_64.sh
+#
+# NVFP4 KV cache notes (sm_120):
+#   - --kv-cache-dtype nvfp4  → works with MTP/EAGLE3 (causal speculator, Triton path)
+#   - --kv-cache-dtype auto   → BF16, required when using DFlash speculator
+#   Current config uses MTP (AEON Qwen3.6-27B-MTP-XS) → nvfp4 KV is ENABLED
+
+services:
+  aeon_vllm:
+    image: aeon-vllm-x86:sm120
+    container_name: aeon_vllm
+    restart: unless-stopped
+    runtime: nvidia
+
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      # Triton NVFP4 KV: requires causal attention backend (MTP), NOT DFlash
+      # If you switch to DFlash speculator, change kv-cache-dtype to auto below
+      - VLLM_ATTENTION_BACKEND=FLASH_ATTN
+      # Reduce OOM risk under sustained multi-GPU load (consistent with AEON tuning)
+      - VLLM_GPU_MEMORY_UTILIZATION=0.88
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    ports:
+      - "8000:8000"
+
+    volumes:
+      # HuggingFace model cache — adjust path to your Unraid array share
+      - /mnt/user/appdata/aeon/models:/root/.cache/huggingface
+      # Optional: mount local model directory for offline use
+      # - /mnt/user/models/AEON-7:/models
+
+    command:
+      - "-c"
+      - |
+        python3 -m vllm.entrypoints.openai.api_server \
+          --model AEON-7/Qwen3.6-27B-Multimodal-NVFP4-MTP-XS \
+          --tensor-parallel-size 2 \
+          --quantization compressed-tensors \
+          --kv-cache-dtype nvfp4 \
+          --max-model-len 131072 \
+          --gpu-memory-utilization 0.88 \
+          --enforce-eager false \
+          --speculative-config '{"method":"mtp","num_speculative_tokens":4}' \
+          --limit-mm-per-prompt "image=4,video=1" \
+          --host 0.0.0.0 \
+          --port 8000
+
+    # healthcheck aligned with vllm-openai standard
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+    # Shared memory for PyTorch multi-GPU comms (NCCL)
+    shm_size: "2gb"
+    ulimits:
+      memlock: -1
+      stack: 67108864

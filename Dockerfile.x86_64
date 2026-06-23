@@ -1,0 +1,177 @@
+# vLLM x86_64 + sm_120 (RTX 5060 Ti / GB206 Blackwell)
+# Adapted from AEON-7/vllm-ultimate-dgx-spark (ARM64/sm_121a DGX Spark)
+# by EnricoFerrero64 — branch feat/x86_64-sm120
+#
+# Changes vs upstream Dockerfile:
+#   - Base: nvcr.io/nvidia/cuda:13.0.0-devel-ubuntu22.04 (x86_64 instead of ARM64 AEON base)
+#   - TORCH_CUDA_ARCH_LIST=12.0 (sm_120 instead of 12.1a)
+#   - CUDA lib path: x86_64-linux (instead of sbsa-linux)
+#   - vLLM source cloned from lesj0610/vllm@e8c77b85 inside Docker
+#     (instead of COPY vllm-src/ — which required a local pre-clone)
+#   - PyTorch 2.11.0+cu130 installed from official whl index
+#   - flashinfer 0.6.12 from flashinfer.ai whl (falls back to source build)
+#
+# NVFP4 KV cache on sm_120:
+#   - Triton path (PR #44389): works with CAUSAL speculators (--speculative-config method=mtp/eagle3/ngram)
+#   - FlashInfer NVFP4 path: requires SM100 (B100/B200) — NOT available on sm_120
+#   - DFlash speculator: must use --kv-cache-dtype auto (BF16) instead of nvfp4
+#   - AEON Qwen3.6-27B-MTP-XS uses MTP → --kv-cache-dtype nvfp4 SHOULD work
+
+FROM nvcr.io/nvidia/cuda:13.0.0-devel-ubuntu22.04
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# Target: x86_64 sm_120 (RTX 5060 Ti)
+ENV TORCH_CUDA_ARCH_LIST="12.0"
+# Skip SM100-only kernels (B100/B200 only, fail on sm_120)
+ENV ENABLE_NVFP4_SM100=0
+ENV CCACHE_DISABLE=1
+ENV CMAKE_BUILD_PARALLEL_LEVEL=8
+ENV MAX_JOBS=12
+ENV NVCC_THREADS=2
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+# Skip setuptools-scm git detection (fresh clone has no .git from AEON)
+ENV SETUPTOOLS_SCM_PRETEND_VERSION="0.23.0+aeon.x86.sm120"
+ENV SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM="0.23.0+aeon.x86.sm120"
+
+WORKDIR /build
+
+# System deps: Python 3.12 (via deadsnakes PPA for Ubuntu 22.04) + CUDA 13.0 dev headers
+# Ubuntu 22.04 ships Python 3.10 by default; deadsnakes provides 3.12
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends software-properties-common && \
+    add-apt-repository -y ppa:deadsnakes/ppa && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        python3.12 python3.12-dev python3.12-venv \
+        python3-pip \
+        git ca-certificates curl \
+        cuda-nvrtc-dev-13-0 \
+        libcusparse-dev-13-0 \
+        libcublas-dev-13-0 \
+        libcusolver-dev-13-0 \
+        libcufft-dev-13-0 \
+        libcurand-dev-13-0 \
+        libnvjitlink-dev-13-0 && \
+    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1 && \
+    update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 && \
+    curl -sS https://bootstrap.pypa.io/get-pip.py | python3.12 && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Fix libnvrtc.so symlink — x86_64 path (some CUDA 13.0 dev packages miss the unversioned symlink)
+RUN CUDA_LIB=/usr/local/cuda-13.0/targets/x86_64-linux/lib && \
+    if [ ! -f "$CUDA_LIB/libnvrtc.so" ] && ls "$CUDA_LIB/libnvrtc.so.13"* &>/dev/null; then \
+        ln -sf "$(ls $CUDA_LIB/libnvrtc.so.13* | head -1)" "$CUDA_LIB/libnvrtc.so"; \
+        echo "Created libnvrtc.so symlink"; \
+    fi && \
+    ls -la "$CUDA_LIB/libnvrtc.so"* 2>/dev/null || echo "[libnvrtc] no symlink needed"
+
+# PyTorch 2.11.0+cu130 for x86_64 — must be installed BEFORE vLLM build
+# (vLLM's CMake/setup.py locates torch includes via the installed package)
+# torchvision/torchaudio not needed for LLM serving
+RUN pip3 install --no-cache-dir \
+    "torch==2.11.0+cu130" \
+    --index-url https://download.pytorch.org/whl/cu130 && \
+    python3 -c "import torch; print('torch:', torch.__version__, '| cuda:', torch.version.cuda)"
+
+# Clone vLLM fork with all 4 PRs already merged:
+#   PR #44389 — Triton NVFP4 KV cache (~3x capacity vs FP8)
+#   PR #40898 — DFlash sliding-window attention correctness
+#   PR #41703 — prefix-cache corruption fix (contains #40898)
+#   PR #43982 — DFlash high-concurrency fix (stable at 64+ concurrent requests)
+# See SOURCE.md for merge details and conflict resolution notes.
+RUN git clone --filter=blob:none \
+      https://github.com/lesj0610/vllm.git \
+      --branch lesj/triton-nvfp4-kv-fork-20260602 \
+      /build/vllm-src && \
+    cd /build/vllm-src && \
+    git checkout e8c77b85 && \
+    echo "[vllm-src] checked out: $(git log --oneline -1)"
+
+# Build vLLM from source targeting sm_120.
+# pip install . (with deps) lets vLLM pull in ray, aiohttp, etc.
+# torch may get overwritten by pip — we re-pin to cu130 in the next step.
+# Compilation takes 60–90 minutes on a Blackwell GPU (RTX 5060 Ti).
+WORKDIR /build/vllm-src
+RUN pip3 install -v . 2>&1 | tee /tmp/vllm-install.log | tail -120 && \
+    echo "[vllm pip install] exit=$?"
+
+# Re-pin PyTorch to 2.11.0+cu130 in case vLLM's deps pulled a different version
+RUN pip3 install --no-cache-dir --force-reinstall \
+    "torch==2.11.0+cu130" \
+    --index-url https://download.pytorch.org/whl/cu130 && \
+    python3 -c "import torch; assert '2.11.0' in torch.__version__, f'wrong torch: {torch.__version__}'; print('torch pinned:', torch.__version__)"
+
+# flashinfer 0.6.12 — try pre-built whl first, fall back to source build for sm_120
+# Source build inherits TORCH_CUDA_ARCH_LIST=12.0 from env
+RUN pip3 install --no-cache-dir "flashinfer==0.6.12" \
+      --extra-index-url https://flashinfer.ai/whl/cu130/torch2.11/ \
+      2>&1 | tail -10 || \
+    (echo "[INFO] Pre-built flashinfer wheel not found; building from source for sm_120 (slow)..." && \
+     pip3 install --no-cache-dir \
+       "git+https://github.com/flashinfer-ai/flashinfer.git@v0.6.12" \
+       2>&1 | tail -30) && \
+    python3 -c "import flashinfer; print('flashinfer:', flashinfer.__version__)"
+
+# NVIDIA ModelOpt — needed for NVFP4/compressed-tensors weight loading
+RUN pip3 install --no-cache-dir "nvidia-modelopt>=0.23.0" 2>&1 | tail -5 || \
+    echo "[WARN] modelopt unavailable — NVFP4 weight loading may fail at runtime"
+
+# Apply AEON runtime patches (idempotent — no-op if already applied or anchor not found)
+# patch_cuda_optional_import: wraps _C_stable_libtorch import in RTLD_LAZY to tolerate
+#   unresolved SM100-only MXFP4 symbols on sm_120 (explicitly handles both sm_120 + sm_121a)
+# patch_kv_cache_utils: fixes TypeError on hybrid-attention models (Qwen3.6) where
+#   linear-attention layers have block_size=None, crashing min() across mixed groups
+# patch_cudagraph_align: fixes cudaErrorIllegalAddress in PIECEWISE CUDA graph mode
+#   when speculative decoding K tokens are not aligned to batch capture sizes
+COPY patches/ /aeon-patches/
+RUN cd /aeon-patches && \
+    echo "=== AEON patch 1: cuda_optional_import (sm_120 RTLD_LAZY dlopen) ===" && \
+    python3 patch_cuda_optional_import.py && \
+    echo "=== AEON patch 2: kv_cache_utils (hybrid-attn block_size=None) ===" && \
+    python3 patch_kv_cache_utils.py && \
+    echo "=== AEON patch 3: cudagraph_align (PIECEWISE spec-decode batch alignment) ===" && \
+    python3 patch_cudagraph_align.py && \
+    echo "[AEON patches] all applied"
+
+# scipy (TurboQuant dep) + TurboQuant AEON fork (CUDA-graph-safe QJL speculative powers)
+RUN pip3 install --no-cache-dir "scipy>=1.11" 2>&1 | tail -3 && \
+    pip3 install --no-cache-dir --no-deps \
+      "turboquant @ git+https://github.com/AEON-7/turboquant.git@fix/cuda-graph-safe-qjl-powers" \
+      2>&1 | tail -3 || \
+    echo "[WARN] turboquant unavailable — QJL speculative decoding not supported"
+
+# transformers HEAD — Qwen3.6 multimodal architecture needs 5.10+
+RUN pip3 install --no-cache-dir --upgrade \
+      "transformers @ git+https://github.com/huggingface/transformers.git@main" \
+      2>&1 | tail -3 && \
+    python3 -c "import transformers; print('transformers:', transformers.__version__)"
+
+# humming-stub: vLLM eagerly imports from the NVIDIA-internal `humming` quant library
+# at init time (gated by is_cuda()). Without the real lib or this stub, vLLM fails
+# to load even for models that don't use humming quantization.
+COPY humming-stub/ /tmp/humming-stub/
+RUN pip3 install --no-cache-dir /tmp/humming-stub && rm -rf /tmp/humming-stub && \
+    python3 -c "from humming.dtypes import DataType; print('humming-stub: importable')"
+
+# Verify environment
+COPY verify.py /tmp/verify.py
+RUN python3 /tmp/verify.py && rm /tmp/verify.py
+
+# Smoke import: confirm core vLLM symbols load successfully
+RUN python3 -c "\
+from vllm import LLM, SamplingParams; \
+print('vllm.LLM import: ok'); \
+from vllm.config import VllmConfig; \
+print('VllmConfig import: ok'); \
+print('Build complete — sm_120 x86_64 ready')"
+
+# Cleanup build artifacts
+RUN rm -rf /build /aeon-patches /root/.cache/pip /tmp/*.log
+
+EXPOSE 8000
+
+# Keep same ENTRYPOINT as upstream AEON image for compatibility
+# docker-compose specifies the full `python3 -m vllm.entrypoints.openai.api_server` command
+ENTRYPOINT ["/bin/bash"]

@@ -1,0 +1,16 @@
+# Exclude benchmark data and perf assets — not needed in image
+*.json
+bench_*.py
+bench_summary.md
+assets/
+gemma4-nvfp4/
+
+# Exclude upstream Dockerfile (ARM64) — use Dockerfile.x86_64 explicitly
+Dockerfile
+Dockerfile.pr41703-layer
+
+# Exclude git history from build context
+.git/
+
+# Exclude macOS metadata
+.DS_Store
