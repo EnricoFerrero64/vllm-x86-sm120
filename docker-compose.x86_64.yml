@@ -16,11 +16,16 @@ services:
     restart: unless-stopped
     runtime: nvidia
 
+    # HF token loaded from .env file (not committed — see .env.example)
+    # Create /boot/config/plugins/compose.manager/projects/aeon_vllm/.env with:
+    #   HF_TOKEN=hf_yourtoken
+    env_file:
+      - path: .env
+        required: false
+
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-      # HuggingFace token — set in Unraid as env var or populate directly here
-      # Required if AEON-7/Qwen3.6-27B-Multimodal-NVFP4-MTP-XS is a private/gated model
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
       # Triton NVFP4 KV: requires causal attention backend (MTP), NOT DFlash
       # If you switch to DFlash speculator, change kv-cache-dtype to auto below

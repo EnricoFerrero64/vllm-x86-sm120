@@ -136,15 +136,17 @@ RUN cd /aeon-patches && \
     echo "[AEON patches] all applied"
 
 # scipy (TurboQuant dep) + TurboQuant AEON fork (CUDA-graph-safe QJL speculative powers)
+# Pinned to commit hash — not the branch tip — to prevent supply chain drift
 RUN pip3 install --no-cache-dir "scipy>=1.11" 2>&1 | tail -3 && \
     pip3 install --no-cache-dir --no-deps \
-      "turboquant @ git+https://github.com/AEON-7/turboquant.git@fix/cuda-graph-safe-qjl-powers" \
+      "turboquant @ git+https://github.com/AEON-7/turboquant.git@058fe891f20baee3b6ac8976049bdf31b1270edf" \
       2>&1 | tail -3 || \
     echo "[WARN] turboquant unavailable — QJL speculative decoding not supported"
 
-# transformers HEAD — Qwen3.6 multimodal architecture needs 5.10+
+# transformers — Qwen3.6 multimodal needs 5.10+; pinned to specific commit (no @main drift)
+# Pinned: 2026-06-23 HEAD of main (c2fafabbe...)
 RUN pip3 install --no-cache-dir --upgrade \
-      "transformers @ git+https://github.com/huggingface/transformers.git@main" \
+      "transformers @ git+https://github.com/huggingface/transformers.git@c2fafabbebd83cd6062c809ab602bbeafab639b9" \
       2>&1 | tail -3 && \
     python3 -c "import transformers; print('transformers:', transformers.__version__)"
 
