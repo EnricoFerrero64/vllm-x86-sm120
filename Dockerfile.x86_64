@@ -81,13 +81,11 @@ RUN pip3 install --no-cache-dir \
 #   PR #41703 — prefix-cache corruption fix (contains #40898)
 #   PR #43982 — DFlash high-concurrency fix (stable at 64+ concurrent requests)
 # See SOURCE.md for merge details and conflict resolution notes.
-RUN git clone --filter=blob:none \
-      https://github.com/lesj0610/vllm.git \
+RUN git clone --depth=1 \
       --branch lesj/triton-nvfp4-kv-fork-20260602 \
+      https://github.com/lesj0610/vllm.git \
       /build/vllm-src && \
-    cd /build/vllm-src && \
-    git checkout e8c77b85 && \
-    echo "[vllm-src] checked out: $(git log --oneline -1)"
+    echo "[vllm-src] checked out: $(git -C /build/vllm-src log --oneline -1)"
 
 # Build vLLM from source targeting sm_120.
 # pip install . (with deps) lets vLLM pull in ray, aiohttp, etc.
