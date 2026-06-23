@@ -149,19 +149,31 @@ def chk_patch_sm120_triton():
 
 
 def chk_patch_cuda_optional():
-    """Verify RTLD_LAZY patch for SM100-only symbols."""
-    candidates = list(Path("/").rglob("vllm/__init__.py"))[:3]
-    for p in candidates:
-        text = p.read_text(encoding="utf-8")
-        if "RTLD_LAZY" in text or "cdll.LoadLibrary" in text:
-            return PASS, f"cuda_optional_import patch applied ({p.parent})"
-    # check in _C_stable_libtorch loader
-    p2 = _find_file("vllm/_C_stable_libtorch.py")
-    if p2 and p2.exists():
-        text2 = p2.read_text(encoding="utf-8")
-        if "RTLD_LAZY" in text2:
-            return PASS, f"cuda_optional_import patch applied ({p2})"
-    return WARN, "cuda_optional_import patch marker not detected (may be in _C loader)"
+    """Verify RTLD_LAZY patch for SM100-only symbols.
+
+    Uses site-packages lookup only — never scans from '/' which hits
+    /sys/kernel/slab and other pseudo-fs paths that raise IOError/EIO.
+    """
+    markers = ("RTLD_LAZY", "cdll.LoadLibrary")
+    # Check vllm/__init__.py via site-packages
+    p_init = _find_file("vllm/__init__.py")
+    if p_init and p_init.exists():
+        text = p_init.read_text(encoding="utf-8")
+        if any(m in text for m in markers):
+            return PASS, f"cuda_optional_import patch applied (vllm/__init__.py)"
+    # Check _C_stable_libtorch.py
+    p_c = _find_file("vllm/_C_stable_libtorch.py")
+    if p_c and p_c.exists():
+        text = p_c.read_text(encoding="utf-8")
+        if any(m in text for m in markers):
+            return PASS, f"cuda_optional_import patch applied (_C_stable_libtorch.py)"
+    # Check vllm/_custom_ops.py (alternate location in some forks)
+    p_ops = _find_file("vllm/_custom_ops.py")
+    if p_ops and p_ops.exists():
+        text = p_ops.read_text(encoding="utf-8")
+        if any(m in text for m in markers):
+            return PASS, f"cuda_optional_import patch applied (_custom_ops.py)"
+    return WARN, "cuda_optional_import patch marker not detected (may be in a different loader file)"
 
 
 def chk_flashinfer():
