@@ -27,9 +27,6 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/aeon-vllm-x86
-  # Layer cache stored as a separate GHCR tag — survives across runs
-  CACHE_REF: ghcr.io/${{ github.repository_owner }}/aeon-vllm-x86:buildcache
 
 jobs:
   build:
@@ -51,6 +48,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # GHCR requires all-lowercase repository names.
+      # github.repository_owner can contain uppercase (e.g. EnricoFerrero64),
+      # so we compute a lowercase version here and use it in all subsequent steps.
+      - name: Compute lowercase image refs
+        id: refs
+        run: |
+          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "image_name=${OWNER_LC}/aeon-vllm-x86" >> "$GITHUB_OUTPUT"
+          echo "cache_ref=ghcr.io/${OWNER_LC}/aeon-vllm-x86:buildcache" >> "$GITHUB_OUTPUT"
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -66,7 +73,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ steps.refs.outputs.image_name }}
           tags: |
             type=raw,value=sm120
             type=sha,prefix=sha-,format=short
@@ -84,17 +91,15 @@ jobs:
           # Registry cache: pull warm layers from GHCR, push updated layers back.
           # Primed by the first local build (./build-x86_64.sh --push-cache).
           # mode=max caches every intermediate layer, not just the final image.
-          cache-from: type=registry,ref=${{ env.CACHE_REF }}
-          cache-to: ${{ inputs.no_cache != true && format('type=registry,ref={0},mode=max', env.CACHE_REF) || '' }}
+          cache-from: type=registry,ref=${{ steps.refs.outputs.cache_ref }}
+          cache-to: ${{ inputs.no_cache != true && format('type=registry,ref={0},mode=max', steps.refs.outputs.cache_ref) || '' }}
           no-cache: ${{ inputs.no_cache == true }}
           build-args: |
             BUILDKIT_INLINE_CACHE=1
 
       - name: Report pushed tags
-        env:
-          PUSHED_TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           echo "=== Pushed tags ==="
-          echo "$PUSHED_TAGS"
+          echo "${{ steps.meta.outputs.tags }}"
           echo "Pull command:"
-          echo "  docker pull ghcr.io/${{ env.IMAGE_NAME }}:sm120"
+          echo "  docker pull ghcr.io/${{ steps.refs.outputs.image_name }}:sm120"
