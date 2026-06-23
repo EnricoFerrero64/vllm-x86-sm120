@@ -198,34 +198,23 @@ from vllm import LLM, SamplingParams; \
 from vllm.config import VllmConfig; \
 print('Build complete — sm_120 x86_64 ready')"
 
-# ── MUTABLE LAYER 14: strip + slim ───────────────────────────────────────────
-# Must run in builder BEFORE the COPY to runtime stage — stripping after COPY
-# would keep both the large (pre-strip) and small (post-strip) versions in
-# separate layers, actually increasing total size.
+# ── MUTABLE LAYER 14: slim ───────────────────────────────────────────────────
+# NO strip on .so files — pre-built wheels (torch, numpy, scipy, modelopt) use
+# non-standard ELF layouts that strip --strip-unneeded can corrupt (proven with
+# OpenBLAS: "ELF load command address/offset not page-aligned").
 #
-# strip --strip-unneeded: removes debug symbols, keeps exported symbols
-# (safe for dlopen — all dynamic linking symbols are preserved).
-# Saves 3-5 GB from torch .so files alone.
-#
-# torch/include/: C++ headers needed only for extension compilation (done above).
-# torch/test/:   PyTorch test suite, not needed at runtime.
-# *.pyi:         IDE type stubs, not needed at runtime.
-# __pycache__:   Regenerated on first import; stale across Python minor versions.
-# Strip only .so files we compiled ourselves — safer than stripping pre-built
-# wheels from third parties (torch/lib/, numpy, scipy all use non-standard ELF
-# layouts that strip --strip-unneeded can corrupt).
-# vllm + flashinfer are compiled in this build and are standard ELF C extensions.
-RUN find /usr/local/lib/python3.12/dist-packages/vllm/ -name "*.so*" -type f \
-        -exec strip --strip-unneeded {} + 2>/dev/null || true && \
-    find /usr/local/lib/python3.12/dist-packages/flashinfer/ -name "*.so*" -type f \
-        -exec strip --strip-unneeded {} + 2>/dev/null || true && \
-    rm -rf \
+# Safe removals only — none of these are needed at runtime:
+# torch/include/: C++ headers for extension compilation (done in builder stage)
+# torch/test/:    PyTorch test suite (~400 MB)
+# *.pyi:          IDE type stubs (~100 MB)
+# __pycache__:    Regenerated on first import
+RUN rm -rf \
         /usr/local/lib/python3.12/dist-packages/torch/include/ \
         /usr/local/lib/python3.12/dist-packages/torch/test/ && \
     find /usr/local/lib/python3.12/ -name "*.pyi" -delete 2>/dev/null || true && \
     find /usr/local/lib/python3.12/ -type d -name "__pycache__" \
         -exec rm -rf {} + 2>/dev/null || true && \
-    echo "[slim] done — stripped .so files and removed build-only artifacts"
+    echo "[slim] done — removed build-only artifacts (no .so stripping)"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # STAGE 2: runtime — lean image pushed to GHCR (~15-18 GB vs ~40 GB)
