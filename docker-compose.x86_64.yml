@@ -37,9 +37,7 @@ services:
 
   # ── vLLM inference server ───────────────────────────────────────────────────
   aeon_vllm:
-    # After first local build + --push-cache, switch to the GHCR image:
-    #   image: ghcr.io/enricoferrero64/aeon-vllm-x86:sm120
-    image: aeon-vllm-x86:sm120
+    image: ghcr.io/enricoferrero64/aeon-vllm-x86:sm120
     container_name: aeon_vllm
     restart: unless-stopped
     runtime: nvidia
