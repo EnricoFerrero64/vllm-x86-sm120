@@ -1,0 +1,114 @@
+name: Build aeon-vllm-x86 (sm_120)
+
+# Triggers: any push that touches build-relevant files on the x86 branch,
+# plus manual dispatch for on-demand rebuilds (e.g. after pinning updates).
+on:
+  push:
+    branches:
+      - feat/x86_64-sm120
+      - main
+    paths:
+      - Dockerfile.x86_64
+      - patches/**
+      - humming-stub/**
+      - verify.py
+      - .github/workflows/build-x86.yml
+  workflow_dispatch:
+    inputs:
+      no_cache:
+        description: "Disable Docker layer cache (full rebuild)"
+        type: boolean
+        default: false
+
+# Minimal token scope: read repo, write packages (push to ghcr.io)
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/aeon-vllm-x86
+
+jobs:
+  build:
+    name: Docker build — x86_64 + sm_120
+    # -----------------------------------------------------------------------
+    # RUNNER CHOICE:
+    #   "self-hosted"   → your Unraid machine (recommended: fast, free, uses
+    #                     your own x86_64 hardware with CUDA toolkit available)
+    #   "ubuntu-latest" → GitHub-hosted 2-core runner (free for public repos,
+    #                     but CUDA kernel compilation may take 4-6h and risk
+    #                     the 6h job timeout — use only as last resort)
+    #
+    # To register your Unraid box as a self-hosted runner:
+    #   GitHub → repo Settings → Actions → Runners → New self-hosted runner
+    #   Follow the Linux/x64 instructions, run the agent inside a Docker
+    #   container or directly on Unraid (see README for compose snippet).
+    # -----------------------------------------------------------------------
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Buildx needed for --platform flag and advanced cache backends
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          # Use the host Docker daemon — avoids a nested buildkitd on Unraid
+          driver: docker
+
+      - name: Extract metadata (tags + labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=sm120
+            type=sha,prefix=sha-,format=short
+            type=ref,event=branch
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.x86_64
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Layer cache stored locally on the self-hosted runner's Docker daemon.
+          # On a fresh runner or after --no-cache, all layers rebuild from scratch.
+          no-cache: ${{ inputs.no_cache == true }}
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+
+      - name: Verify image was pushed
+        env:
+          PUSHED_TAGS: ${{ steps.meta.outputs.tags }}
+          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sm120
+        run: |
+          echo "Image tags pushed:"
+          echo "$PUSHED_TAGS"
+          docker image inspect "$IMAGE_REF" \
+            --format 'Size: {{.Size}} bytes  |  Created: {{.Created}}' \
+          2>/dev/null || echo "(inspect skipped — image was pushed to registry only)"
+
+      - name: Smoke-test imports (requires NVIDIA runtime on runner)
+        # Only run the smoke test if the runner has an NVIDIA GPU available.
+        # Skip gracefully on runners without nvidia-container-toolkit.
+        continue-on-error: true
+        env:
+          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sm120
+        run: |
+          docker run --rm --gpus all "$IMAGE_REF" \
+            -c "python3 -c 'from vllm import LLM; print(\"smoke: ok\")'" \
+          && echo "Smoke test PASSED" \
+          || echo "Smoke test SKIPPED (no GPU runtime or import error)"

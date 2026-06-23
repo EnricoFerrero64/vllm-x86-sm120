@@ -3,7 +3,7 @@
 # by EnricoFerrero64 — branch feat/x86_64-sm120
 #
 # Changes vs upstream Dockerfile:
-#   - Base: nvcr.io/nvidia/cuda:13.0.0-devel-ubuntu22.04 (x86_64 instead of ARM64 AEON base)
+#   - Base: nvcr.io/nvidia/cuda:13.0.3-devel-ubuntu22.04 (x86_64 instead of ARM64 AEON base)
 #   - TORCH_CUDA_ARCH_LIST=12.0 (sm_120 instead of 12.1a)
 #   - CUDA lib path: x86_64-linux (instead of sbsa-linux)
 #   - vLLM source cloned from lesj0610/vllm@e8c77b85 inside Docker
@@ -17,7 +17,7 @@
 #   - DFlash speculator: must use --kv-cache-dtype auto (BF16) instead of nvfp4
 #   - AEON Qwen3.6-27B-MTP-XS uses MTP → --kv-cache-dtype nvfp4 SHOULD work
 
-FROM nvcr.io/nvidia/cuda:13.0.0-devel-ubuntu22.04
+FROM nvcr.io/nvidia/cuda:13.0.3-devel-ubuntu22.04
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
