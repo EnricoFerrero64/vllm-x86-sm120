@@ -39,7 +39,7 @@ The upstream image targets the **NVIDIA DGX Spark (GB10, sm_121a, 128 GB unified
 
 ---
 
-## Quickstart (Jarvis / Unraid — copy-paste)
+## Quickstart (Unraid — copy-paste)
 
 ```bash
 # 1. Clone this repo on the Unraid host
@@ -47,7 +47,7 @@ git clone https://github.com/EnricoFerrero64/vllm-x86-sm120.git /mnt/user/appdat
 cd /mnt/user/appdata/aeon
 
 # 2. (First time) Log in to GHCR
-echo $GITHUB_TOKEN | docker login ghcr.io -u EnricoFerrero64 --password-stdin
+echo $GITHUB_TOKEN | docker login ghcr.io -u $USER --password-stdin
 
 # 3. Pull the prebuilt image (or build locally — see Build section)
 docker pull ghcr.io/enricoferrero64/aeon-vllm-x86:sm120
