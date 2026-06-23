@@ -151,29 +151,20 @@ def chk_patch_sm120_triton():
 def chk_patch_cuda_optional():
     """Verify RTLD_LAZY patch for SM100-only symbols.
 
-    Uses site-packages lookup only — never scans from '/' which hits
-    /sys/kernel/slab and other pseudo-fs paths that raise IOError/EIO.
+    The patch modifies vllm/platforms/cuda.py, wrapping the
+    '_C_stable_libtorch' import with RTLD_LAZY flags.
+    Marker inserted by the patch: '# stable_libtorch_lazy_dlopen'
     """
-    markers = ("RTLD_LAZY", "cdll.LoadLibrary")
-    # Check vllm/__init__.py via site-packages
-    p_init = _find_file("vllm/__init__.py")
-    if p_init and p_init.exists():
-        text = p_init.read_text(encoding="utf-8")
-        if any(m in text for m in markers):
-            return PASS, f"cuda_optional_import patch applied (vllm/__init__.py)"
-    # Check _C_stable_libtorch.py
-    p_c = _find_file("vllm/_C_stable_libtorch.py")
-    if p_c and p_c.exists():
-        text = p_c.read_text(encoding="utf-8")
-        if any(m in text for m in markers):
-            return PASS, f"cuda_optional_import patch applied (_C_stable_libtorch.py)"
-    # Check vllm/_custom_ops.py (alternate location in some forks)
-    p_ops = _find_file("vllm/_custom_ops.py")
-    if p_ops and p_ops.exists():
-        text = p_ops.read_text(encoding="utf-8")
-        if any(m in text for m in markers):
-            return PASS, f"cuda_optional_import patch applied (_custom_ops.py)"
-    return WARN, "cuda_optional_import patch marker not detected (may be in a different loader file)"
+    # Primary target — what the patch actually modifies
+    p = _find_file("vllm/platforms/cuda.py")
+    if p and p.exists():
+        text = p.read_text(encoding="utf-8")
+        if "stable_libtorch_lazy_dlopen" in text:
+            return PASS, f"RTLD_LAZY patch applied (platforms/cuda.py)"
+        if "import vllm._C_stable_libtorch" not in text:
+            return WARN, "platforms/cuda.py: _C_stable_libtorch import not present (upstream refactored)"
+        return WARN, "cuda_optional_import patch NOT applied — sm_120 may crash on MXFP4 symbol load"
+    return WARN, "vllm/platforms/cuda.py not found — patch check skipped"
 
 
 def chk_flashinfer():

@@ -49,14 +49,6 @@ import sys
 from pathlib import Path
 
 
-ANCHOR = """\
-    if tuned_large_head:
-        BLOCK_M = 32
-        BLOCK_Q = BLOCK_M // num_queries_per_kv
-        launch_num_warps = 8
-        launch_num_stages = 2
-"""
-
 INSERTION = """\
     # sm_12x family (sm_120 RTX 5060 Ti / sm_121a DGX Spark) — head_size 128.
     # Prevents Triton JIT from autotuning at first-token time (+100-200 ms cold
@@ -72,22 +64,39 @@ INSERTION = """\
 
 TARGET_MARKER = "tuned_sm12x_decode"
 
+# Try multiple anchor variants — the tuned_large_head block exists in several
+# forms across vLLM versions.  First match wins.
+ANCHORS = [
+    # Original form (upstream main at time of fork)
+    "    if tuned_large_head:\n"
+    "        BLOCK_M = 32\n"
+    "        BLOCK_Q = BLOCK_M // num_queries_per_kv\n"
+    "        launch_num_warps = 8\n"
+    "        launch_num_stages = 2\n",
+    # Variant: no BLOCK_Q line
+    "    if tuned_large_head:\n"
+    "        BLOCK_M = 32\n"
+    "        launch_num_warps = 8\n"
+    "        launch_num_stages = 2\n",
+    # Variant: different warp count
+    "    if tuned_large_head:\n"
+    "        BLOCK_M = 32\n"
+    "        BLOCK_Q = BLOCK_M // num_queries_per_kv\n"
+    "        launch_num_warps = 4\n"
+    "        launch_num_stages = 2\n",
+]
+
 
 def find_triton_attention_file() -> Path:
-    candidates = [
-        Path("/build/vllm-src/vllm/v1/attention/ops/triton_unified_attention.py"),
-        # installed package path (post pip-install)
-        *Path("/usr").rglob("triton_unified_attention.py"),
-    ]
-    for p in candidates:
-        if p.exists():
-            return p
-    # fallback: search site-packages
     import site
     for sp in site.getsitepackages():
         p = Path(sp) / "vllm/v1/attention/ops/triton_unified_attention.py"
         if p.exists():
             return p
+    # Also check build source tree (pre-install)
+    src = Path("/build/vllm-src/vllm/v1/attention/ops/triton_unified_attention.py")
+    if src.exists():
+        return src
     return None
 
 
@@ -103,13 +112,20 @@ def main() -> int:
         print(f"[sm120-triton] already patched: {target}")
         return 0
 
-    if ANCHOR not in text:
-        print(f"[sm120-triton] WARN: anchor not found in {target} — skipping (upstream may have changed)")
-        return 0
+    for anchor in ANCHORS:
+        if anchor in text:
+            patched = text.replace(anchor, anchor + INSERTION, 1)
+            target.write_text(patched, encoding="utf-8")
+            print(f"[sm120-triton] patched: {target}")
+            return 0
 
-    patched = text.replace(ANCHOR, ANCHOR + INSERTION, 1)
-    target.write_text(patched, encoding="utf-8")
-    print(f"[sm120-triton] patched: {target}")
+    # No anchor matched — dump the tuned_large_head context to help debug
+    import re
+    ctx = re.search(r"tuned_large_head[^\n]*\n(?:[ \t]+[^\n]*\n){0,6}", text)
+    hint = ctx.group(0).rstrip() if ctx else "(tuned_large_head block not found)"
+    print(f"[sm120-triton] WARN: no anchor matched in {target}")
+    print(f"[sm120-triton] Actual tuned_large_head block:\n{hint}")
+    print("[sm120-triton] Skipping — cold-start latency unoptimized")
     return 0
 
 

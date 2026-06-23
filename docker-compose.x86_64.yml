@@ -4,12 +4,38 @@
 # Build the image first on the Unraid host:
 #   cd /path/to/vllm-x86-sm120 && ./build-x86_64.sh
 #
+# ARCHITECTURE:
+#   LiteLLM → sanitizer:8001 → aeon_vllm:8000
+#   ^^ Point LiteLLM / OpenWebUI at port 8001, not 8000.
+#   The sanitizer fixes malformed tool_call JSON in history before vLLM sees it.
+#
 # NVFP4 KV cache notes (sm_120):
 #   - --kv-cache-dtype nvfp4  → works with MTP/EAGLE3 (causal speculator, Triton path)
 #   - --kv-cache-dtype auto   → BF16, required when using DFlash speculator
 #   Current config uses MTP (AEON Qwen3.6-27B-MTP-XS) → nvfp4 KV is ENABLED
 
 services:
+  # ── Tool-call JSON sanitizer ────────────────────────────────────────────────
+  # Fixes malformed arguments (e.g. trailing '}') in tool_call history before
+  # they reach vLLM's json.loads(). Stateless, fast, ~10ms overhead per request.
+  # Point LiteLLM/OpenWebUI at this port instead of vLLM directly.
+  sanitizer:
+    build:
+      context: ./sanitizer
+      dockerfile: Dockerfile
+    container_name: aeon_sanitizer
+    restart: unless-stopped
+    environment:
+      - VLLM_BASE_URL=http://aeon_vllm:8000
+      - LOG_FIXES=1
+    ports:
+      - "8001:8001"
+    depends_on:
+      - aeon_vllm
+    networks:
+      - aeon_net
+
+  # ── vLLM inference server ───────────────────────────────────────────────────
   aeon_vllm:
     # After first local build + --push-cache, switch to the GHCR image:
     #   image: ghcr.io/enricoferrero64/aeon-vllm-x86:sm120
@@ -66,7 +92,10 @@ services:
               capabilities: [gpu]
 
     ports:
-      - "8000:8000"
+      - "8000:8000"   # internal only — clients should use sanitizer:8001
+
+    networks:
+      - aeon_net
 
     volumes:
       # HuggingFace model cache — adjust path to your Unraid array share
@@ -120,3 +149,7 @@ services:
     ulimits:
       memlock: -1
       stack: 67108864
+
+networks:
+  aeon_net:
+    driver: bridge
