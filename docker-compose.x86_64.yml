@@ -81,6 +81,10 @@ services:
       # max_split_size_mb=512 avoids large contiguous alloc failures.
       - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512,garbage_collection_threshold:0.8
 
+      # Faster first model download (Rust-based, 3-4× vs default urllib).
+      # Requires hf_transfer to be installed — included via vLLM deps.
+      - HF_HUB_ENABLE_HF_TRANSFER=1
+
     deploy:
       resources:
         reservations:
@@ -98,6 +102,11 @@ services:
     volumes:
       # HuggingFace model cache — adjust path to your Unraid array share
       - /mnt/user/appdata/aeon/models:/root/.cache/huggingface
+      # Triton JIT kernel cache — persists compiled CUDA kernels across restarts.
+      # Without this, first inference after each restart recompiles kernels (2-5 min).
+      - /mnt/user/appdata/aeon/triton-cache:/root/.triton
+      # torch.compile + CUDA extension cache
+      - /mnt/user/appdata/aeon/torch-cache:/root/.cache/torch
 
     command:
       - "-c"

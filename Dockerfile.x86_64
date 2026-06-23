@@ -212,6 +212,10 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV SETUPTOOLS_SCM_PRETEND_VERSION="0.23.0+aeon.x86.sm120"
 ENV SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM="0.23.0+aeon.x86.sm120"
+# Cache dirs — mount these as volumes to survive container restarts:
+#   /root/.triton        → Triton JIT kernel cache (saves 2-5 min cold start)
+#   /root/.cache/torch   → torch.compile + CUDA extension cache
+ENV TRITON_CACHE_DIR=/root/.triton
 
 # Python 3.12 + CUDA runtime math libs needed by PyTorch/Triton/vLLM at runtime.
 # cuda-nvrtc-13-0      → libnvrtc.so       (Triton JIT kernel compilation)
@@ -227,7 +231,7 @@ RUN apt-get update && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
         python3.12 \
-        git ca-certificates curl \
+        ca-certificates curl \
         cuda-nvrtc-13-0 \
         libcublas-13-0 \
         libcusparse-13-0 \
