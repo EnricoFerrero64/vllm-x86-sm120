@@ -1,0 +1,95 @@
+# KV cache quality fallback — FP8 instead of NVFP4
+#
+# USE WHEN:
+#   - Context lengths > 80K tokens on prose / creative / RAG workloads
+#   - You notice quality degradation (repetition, incoherence) on long outputs
+#   - You need finer attention on early tokens (e.g. very long system prompts)
+#
+# TRADEOFF vs nvfp4 (docker-compose.x86_64.yml):
+#   FP8  KV: 8-bit (e4m3) → ~2× capacity vs BF16 → ~65K ctx in 32GB VRAM
+#   NVFP4 KV: 4-bit (e2m1) → ~3× capacity vs BF16 → ~100K+ ctx in 32GB VRAM
+#
+#   nvfp4 is fine for: coding, JSON, tool calls, math, short-to-medium chat
+#   fp8   is better for: long documents, RAG with many chunks, multi-turn > 60K
+#
+# NOTE: FP8 KV also works with MTP speculative decoding (causal backend).
+# DFlash is NOT used here — keep --speculative-config method: qwen3_5_mtp.
+#
+# START: docker compose -f docker-compose.fp8kv-quality.yml up -d
+# PORT:  8002 (to coexist with the default nvfp4 instance on 8000)
+
+services:
+  aeon_vllm_fp8kv:
+    image: aeon-vllm-x86:sm120
+    container_name: aeon_vllm_fp8kv
+    restart: "no"
+    runtime: nvidia
+
+    env_file:
+      - path: .env
+        required: false
+
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - VLLM_ATTENTION_BACKEND=FLASH_ATTN
+      - VLLM_GPU_MEMORY_UTILIZATION=0.92
+      - NCCL_DMABUF_ENABLE=1
+      - NCCL_P2P_LEVEL=PCI
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512,garbage_collection_threshold:0.8
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    ports:
+      - "8002:8000"
+
+    volumes:
+      - /mnt/user/appdata/aeon/models:/root/.cache/huggingface
+
+    command:
+      - "-c"
+      - |
+        python3 -m vllm.entrypoints.openai.api_server \
+          --model AEON-7/Qwen3.6-27B-Multimodal-NVFP4-MTP-XS \
+          --tensor-parallel-size 2 \
+          --quantization modelopt \
+          --kv-cache-dtype fp8 \
+          --max-model-len 65536 \
+          --gpu-memory-utilization 0.92 \
+          --enforce-eager false \
+          --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":4}' \
+          --mamba-block-size 256 \
+          --mamba-cache-dtype float16 \
+          --mm-encoder-tp-mode data \
+          --limit-mm-per-prompt "image=4,video=1" \
+          --enable-prefix-caching \
+          --enable-chunked-prefill \
+          --max-num-seqs 8 \
+          --max-num-batched-tokens 8192 \
+          --block-size 16 \
+          --disable-custom-all-reduce \
+          --reasoning-parser qwen3 \
+          --tool-call-parser qwen3_coder \
+          --enable-auto-tool-choice \
+          --host 0.0.0.0 \
+          --port 8000
+
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+    shm_size: "16gb"
+    ulimits:
+      memlock: -1
+      stack: 67108864

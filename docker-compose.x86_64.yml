@@ -30,7 +30,16 @@ services:
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
 
-      # Triton NVFP4 KV: requires causal attention backend (MTP), NOT DFlash
+      # Triton NVFP4 KV: requires causal attention backend (MTP), NOT DFlash.
+      # Quality notes for long contexts:
+      #   - NVFP4 (e2m1, 4-bit) uses 1 scale per block_size tokens.
+      #     Smaller block-size = finer scale granularity = less error accumulation.
+      #     Current: --block-size 32 (good bandwidth/quality balance).
+      #     For quality-critical workloads > 80K ctx, use docker-compose.fp8kv-quality.yml
+      #     (FP8 KV, block-size 16, max-model-len 65536).
+      #   - GatedDeltaNet (Mamba/SSM) layers in Qwen3.6 use float16 SSM state,
+      #     NOT KV cache → those layers are unaffected by NVFP4 quantization.
+      #   - Prefix caching protects system prompt tokens from re-quantization.
       - VLLM_ATTENTION_BACKEND=FLASH_ATTN
 
       # 0.92 is safe on dedicated GDDR7 VRAM (vs 0.88 limit on Spark's unified LPDDR5X).
