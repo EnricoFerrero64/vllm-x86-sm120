@@ -57,7 +57,9 @@ RUN apt-get update && \
     update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1 && \
     update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 && \
     curl -sS https://bootstrap.pypa.io/get-pip.py | python3.12 && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+    apt-get clean && rm -rf /var/lib/apt/lists/* && \
+    pip3 install --no-cache-dir "setuptools>=77.0.3,<81" && \
+    python3 -c "import setuptools; print('setuptools:', setuptools.__version__)"
 
 # Fix libnvrtc.so symlink — x86_64 path (some CUDA 13.0 dev packages miss the unversioned symlink)
 RUN CUDA_LIB=/usr/local/cuda-13.0/targets/x86_64-linux/lib && \
@@ -97,21 +99,36 @@ WORKDIR /build/vllm-src
 RUN pip3 install -v . 2>&1 | tee /tmp/vllm-install.log | tail -120 && \
     echo "[vllm pip install] exit=$?"
 
-# Re-pin PyTorch to 2.11.0+cu130 in case vLLM's deps pulled a different version
+# Re-pin PyTorch to 2.11.0+cu130 in case vLLM's deps pulled a different version.
+# Also reconcile CUDA Python ecosystem to 13.0.x — vLLM's transitive deps can
+# pull cuda-python 13.3.1 (needs cuda-bindings~=13.3.1) which conflicts with the
+# cuda-bindings 13.0.3 that PyTorch 2.11.0+cu130 depends on.
 RUN pip3 install --no-cache-dir --force-reinstall \
     "torch==2.11.0+cu130" \
     --index-url https://download.pytorch.org/whl/cu130 && \
-    python3 -c "import torch; assert '2.11.0' in torch.__version__, f'wrong torch: {torch.__version__}'; print('torch pinned:', torch.__version__)"
+    python3 -c "import torch; assert '2.11.0' in torch.__version__, f'wrong torch: {torch.__version__}'; print('torch pinned:', torch.__version__)" && \
+    pip3 install --no-cache-dir \
+      "cuda-python~=13.0.0" \
+      "cuda-bindings~=13.0.0" \
+      2>&1 | tail -5 || \
+    echo "[WARN] cuda-python 13.0.x pin unavailable — resolver conflict is cosmetic only"
 
-# flashinfer 0.6.12 — try pre-built whl first, fall back to source build for sm_120
-# Source build inherits TORCH_CUDA_ARCH_LIST=12.0 from env
+# flashinfer 0.6.12 — try pre-built wheels in order: cu130, cu128 (binary-compatible
+# with cu130), then fall back to source build targeting sm_120.
+# Source build inherits TORCH_CUDA_ARCH_LIST=12.0 from env.
 RUN pip3 install --no-cache-dir "flashinfer==0.6.12" \
       --extra-index-url https://flashinfer.ai/whl/cu130/torch2.11/ \
-      2>&1 | tail -10 || \
-    (echo "[INFO] Pre-built flashinfer wheel not found; building from source for sm_120 (slow)..." && \
-     pip3 install --no-cache-dir \
+      2>&1 | tail -5 && \
+    echo "[flashinfer] cu130 pre-built OK" || \
+    (pip3 install --no-cache-dir "flashinfer==0.6.12" \
+       --extra-index-url https://flashinfer.ai/whl/cu128/torch2.11/ \
+       2>&1 | tail -5 && \
+     echo "[flashinfer] cu128 pre-built OK") || \
+    (echo "[flashinfer] No pre-built wheel; building from source (slow, ~20 min)..." && \
+     TORCH_CUDA_ARCH_LIST="12.0" pip3 install --no-cache-dir \
        "git+https://github.com/flashinfer-ai/flashinfer.git@v0.6.12" \
-       2>&1 | tail -30) && \
+       2>&1 | tail -30 && \
+     echo "[flashinfer] source build OK") && \
     python3 -c "import flashinfer; print('flashinfer:', flashinfer.__version__)"
 
 # NVIDIA ModelOpt — needed for NVFP4/compressed-tensors weight loading
