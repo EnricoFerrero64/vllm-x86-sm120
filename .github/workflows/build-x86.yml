@@ -51,11 +51,11 @@ jobs:
     timeout-minutes: 350
 
     steps:
-      # ubuntu-latest runners ship with ~14 GB free disk by default.
-      # Android SDK (~9 GB), .NET (~2 GB), Haskell (~5 GB), CodeQL (~5 GB)
-      # are preinstalled but useless for a Docker build.  Removing them frees
-      # ~25-30 GB, giving BuildKit enough headroom for the layer cache.
-      - name: Free disk space
+      # ubuntu-latest has ~14 GB free on / — not enough for BuildKit layer extraction.
+      # /mnt is Azure ephemeral disk with ~60 GB free.  Moving Docker's data-root
+      # there gives BuildKit the space it needs for cache blobs + snapshot extraction.
+      # We also strip pre-installed junk from / so the OS partition stays clean.
+      - name: Free disk space on /
         run: |
           sudo rm -rf \
             /usr/local/lib/android \
@@ -68,7 +68,17 @@ jobs:
             /usr/share/java \
             /usr/local/share/chromium
           sudo docker image prune -af
-          df -h /
+          df -h
+
+      - name: Move Docker data-root to /mnt
+        run: |
+          sudo systemctl stop docker
+          sudo mkdir -p /mnt/docker
+          echo '{"data-root": "/mnt/docker"}' | sudo tee /etc/docker/daemon.json
+          sudo systemctl start docker
+          sleep 3
+          docker info | grep "Docker Root Dir"
+          df -h
 
       - name: Checkout
         uses: actions/checkout@v4
