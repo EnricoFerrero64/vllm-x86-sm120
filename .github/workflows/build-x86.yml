@@ -51,6 +51,25 @@ jobs:
     timeout-minutes: 350
 
     steps:
+      # ubuntu-latest runners ship with ~14 GB free disk by default.
+      # Android SDK (~9 GB), .NET (~2 GB), Haskell (~5 GB), CodeQL (~5 GB)
+      # are preinstalled but useless for a Docker build.  Removing them frees
+      # ~25-30 GB, giving BuildKit enough headroom for the layer cache.
+      - name: Free disk space
+        run: |
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /usr/share/swift \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/powershell \
+            /usr/share/java \
+            /usr/local/share/chromium
+          sudo docker image prune -af
+          df -h /
+
       - name: Checkout
         uses: actions/checkout@v4
 
