@@ -1,5 +1,51 @@
 # vLLM source pin
 
+## 2026-06-23 — x86_64 sm_120 port + stability/performance pass
+
+Adapted from AEON-7/vllm-ultimate-dgx-spark (ARM64/sm_121a) to x86_64 + sm_120 (RTX 5060 Ti / GB206).
+
+### Patches applied on top of vLLM fork
+
+| Patch | What it does |
+|---|---|
+| `patch_cuda_optional_import.py` | RTLD_LAZY dlopen for SM100-only MXFP4 symbols absent on sm_120 (ported from AEON) |
+| `patch_kv_cache_utils.py` | Fixes TypeError on hybrid-attention models where GDN layers have block_size=None (ported from AEON) |
+| `patch_cudagraph_align.py` | Fixes cudaErrorIllegalAddress in PIECEWISE CUDA graph mode for spec-decode (ported from AEON) |
+| `patch_sm120_triton_launch.py` | **New (2026-06-23)**: sets `num_warps=4, num_stages=2` explicitly for sm_12x family in `triton_unified_attention.py`, preventing Triton JIT autotuning at first-token time (~100-200 ms cold latency spike) |
+
+### Runtime config changes vs upstream AEON
+
+| Flag | Value | Reason |
+|---|---|---|
+| `--quantization` | `modelopt` | MTP-XS uses modelopt format, not compressed-tensors |
+| `--speculative-config method` | `qwen3_5_mtp` | Model-specific MTP for Qwen3.6 (not generic `mtp`) |
+| `--mamba-block-size` | `256` | Required for GatedDeltaNet hybrid layers in Qwen3.6 |
+| `--mamba-cache-dtype` | `float16` | SSM cache precision (BF16 recurrence layers preserved) |
+| `--mm-encoder-tp-mode` | `data` | Vision encoder runs DP per GPU, LLM uses TP (reduces inter-GPU comm during image encoding) |
+| `--disable-custom-all-reduce` | present | **Critical**: vLLM SymmMemCommunicator doesn't support sm_120; hangs at worker init on PCIe Blackwell without this flag |
+| `--enable-prefix-caching` | present | Reuse KV cache for repeated system prompts |
+| `--enable-chunked-prefill` | present | Reduces peak VRAM during long-context prefill |
+| `--block-size` | `32` | Better DRAM utilization for head_dim=128 GQA models |
+| `--gpu-memory-utilization` | `0.92` | Safe on dedicated GDDR7 (vs 0.88 limit on Spark's unified LPDDR5X) |
+| `shm_size` | `16gb` | Sufficient for NCCL TP=2 buffers with 27B model (2GB was insufficient) |
+
+### NCCL environment variables (Blackwell PCIe, no NVLink)
+
+| Variable | Value | Reason |
+|---|---|---|
+| `NCCL_DMABUF_ENABLE` | `1` | Linux DMA-BUF for direct GPU-to-GPU mapping (resolves race conditions in early Blackwell drivers) |
+| `NCCL_P2P_LEVEL` | `PCI` | Explicit PCIe P2P mode; `NCCL_P2P_LEVEL=NVL` would fail without NVLink |
+| `PYTORCH_CUDA_ALLOC_CONF` | `max_split_size_mb:512,garbage_collection_threshold:0.8` | Prevents VRAM fragmentation under long-running inference |
+
+### Architecture changes vs upstream
+
+- Base image: `nvcr.io/nvidia/cuda:13.0.3-devel-ubuntu22.04` (x86_64 amd64, not ARM64 AEON base)
+- `TORCH_CUDA_ARCH_LIST="12.0"` (sm_120, not 12.1a)
+- CUDA lib symlink path: `x86_64-linux` (not `sbsa-linux`)
+- `MAX_JOBS=4` (tuned for i7-14700K + 62GB RAM to avoid OOM during compile)
+
+---
+
 Build was against:
 
 - **Repo**: `lesj0610/vllm`
@@ -11,12 +57,12 @@ Build was against:
 To reproduce the build:
 
 ```bash
-git clone https://github.com/lesj0610/vllm.git vllm-src
+git clone --filter=blob:none \
+  --branch lesj/triton-nvfp4-kv-fork-20260602 \
+  https://github.com/lesj0610/vllm.git vllm-src
 cd vllm-src
-git checkout lesj/triton-nvfp4-kv-fork-20260602
-git checkout e8c77b85
-cd ..
-# Then docker build -t aeon-vllm-ultimate:latest .
+git checkout e4a9fbee08b14a49470cfcf6a87dd0b2bddb6345
+# Then: cd .. && ./build-x86_64.sh
 ```
 
 The full source is not vendored in this repo (~140 MB) — only the patches, Dockerfile, humming-stub, verify script, bench tooling, and bench artifacts.

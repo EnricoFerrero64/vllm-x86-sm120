@@ -50,7 +50,8 @@ if ! command -v docker &>/dev/null; then
 fi
 
 for f in "$DOCKERFILE" patches/patch_cuda_optional_import.py patches/patch_kv_cache_utils.py \
-          patches/patch_cudagraph_align.py humming-stub/setup.py verify.py; do
+          patches/patch_cudagraph_align.py patches/patch_sm120_triton_launch.py \
+          humming-stub/setup.py verify.py; do
     if [[ ! -f "$f" ]]; then
         echo "[ERROR] Missing required file: $f"
         echo "        Run from the vllm-x86-sm120 repo root."

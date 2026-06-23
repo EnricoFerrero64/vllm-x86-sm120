@@ -1,0 +1,101 @@
+# Pipeline Parallel benchmark config — use to A/B test PP=2 vs TP=2
+#
+# WHY: TP=2 does an all-reduce at every attention layer (28 per forward pass)
+# through PCIe (~32 GB/s). PP=2 splits layers across GPUs with a single
+# activation transfer per pipeline boundary. On PCIe (no NVLink), PP=2 can
+# outperform TP=2 for throughput-oriented workloads.
+#
+# HOW TO BENCHMARK:
+#   1. Start TP config (default):
+#        docker compose -f docker-compose.x86_64.yml up -d
+#   2. Run bench:
+#        python3 bench_vllm.py --num-prompts 20 --output bench_tp2.json
+#   3. Stop, start PP config:
+#        docker compose -f docker-compose.x86_64.yml down
+#        docker compose -f docker-compose.pp2-bench.yml up -d
+#   4. Run same bench:
+#        python3 bench_vllm.py --num-prompts 20 --output bench_pp2.json
+#   5. Compare: python3 bench_categories.py bench_tp2.json bench_pp2.json
+#
+# EXPECTED RESULT:
+#   - PP=2 likely wins on high token-count / high concurrency (TTFT may suffer)
+#   - TP=2 likely wins on low latency / single-stream
+#   Pick the config that matches your primary workload.
+#
+# NOTE: PP=2 with Qwen3.6-27B puts 14 layers on GPU0 and 14 on GPU1.
+# The MTP head stays on the last PP stage (GPU1). This is compatible with
+# qwen3_5_mtp speculative decoding.
+
+services:
+  aeon_vllm_pp2:
+    image: aeon-vllm-x86:sm120
+    container_name: aeon_vllm_pp2
+    restart: "no"
+    runtime: nvidia
+
+    env_file:
+      - path: .env
+        required: false
+
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - VLLM_ATTENTION_BACKEND=FLASH_ATTN
+      - VLLM_GPU_MEMORY_UTILIZATION=0.92
+      - NCCL_DMABUF_ENABLE=1
+      - NCCL_P2P_LEVEL=PCI
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512,garbage_collection_threshold:0.8
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    ports:
+      - "8001:8000"
+
+    volumes:
+      - /mnt/user/appdata/aeon/models:/root/.cache/huggingface
+
+    command:
+      - "-c"
+      - |
+        python3 -m vllm.entrypoints.openai.api_server \
+          --model AEON-7/Qwen3.6-27B-Multimodal-NVFP4-MTP-XS \
+          --pipeline-parallel-size 2 \
+          --quantization modelopt \
+          --kv-cache-dtype nvfp4 \
+          --max-model-len 131072 \
+          --gpu-memory-utilization 0.92 \
+          --enforce-eager false \
+          --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":4}' \
+          --limit-mm-per-prompt "image=4,video=1" \
+          --mamba-block-size 256 \
+          --mamba-cache-dtype float16 \
+          --mm-encoder-tp-mode data \
+          --limit-mm-per-prompt "image=4,video=1" \
+          --disable-custom-all-reduce \
+          --enable-prefix-caching \
+          --enable-chunked-prefill \
+          --max-num-seqs 8 \
+          --max-num-batched-tokens 8192 \
+          --block-size 32 \
+          --host 0.0.0.0 \
+          --port 8000
+
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+    shm_size: "16gb"
+    ulimits:
+      memlock: -1
+      stack: 67108864

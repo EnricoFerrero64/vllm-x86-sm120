@@ -29,11 +29,24 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+
       # Triton NVFP4 KV: requires causal attention backend (MTP), NOT DFlash
-      # If you switch to DFlash speculator, change kv-cache-dtype to auto below
       - VLLM_ATTENTION_BACKEND=FLASH_ATTN
-      # Reduce OOM risk under sustained multi-GPU load (consistent with AEON tuning)
-      - VLLM_GPU_MEMORY_UTILIZATION=0.88
+
+      # 0.92 is safe on dedicated GDDR7 VRAM (vs 0.88 limit on Spark's unified LPDDR5X).
+      # Gives ~+0.6 GB KV cache per GPU = ~+180k extra token capacity at NVFP4.
+      - VLLM_GPU_MEMORY_UTILIZATION=0.92
+
+      # --- Blackwell PCIe (sm_120, no NVLink) NCCL fixes ---
+      # vLLM's SymmMemCommunicator does not support sm_120; custom all-reduce
+      # hangs at worker init on PCIe Blackwell. NCCL handles comms instead.
+      # Source: vLLM Forums 2026 + informatico-madrid/blackwell-linux-infra-optimizer
+      - NCCL_DMABUF_ENABLE=1
+      - NCCL_P2P_LEVEL=PCI
+
+      # Prevent CUDA memory fragmentation under long-running inference.
+      # max_split_size_mb=512 avoids large contiguous alloc failures.
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512,garbage_collection_threshold:0.8
 
     deploy:
       resources:
@@ -49,8 +62,6 @@ services:
     volumes:
       # HuggingFace model cache — adjust path to your Unraid array share
       - /mnt/user/appdata/aeon/models:/root/.cache/huggingface
-      # Optional: mount local model directory for offline use
-      # - /mnt/user/models/AEON-7:/models
 
     command:
       - "-c"
@@ -58,17 +69,34 @@ services:
         python3 -m vllm.entrypoints.openai.api_server \
           --model AEON-7/Qwen3.6-27B-Multimodal-NVFP4-MTP-XS \
           --tensor-parallel-size 2 \
-          --quantization compressed-tensors \
+          --quantization modelopt \
           --kv-cache-dtype nvfp4 \
           --max-model-len 131072 \
-          --gpu-memory-utilization 0.88 \
+          --gpu-memory-utilization 0.92 \
           --enforce-eager false \
-          --speculative-config '{"method":"mtp","num_speculative_tokens":4}' \
+          --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":4}' \
+          \
+          --mamba-block-size 256 \
+          --mamba-cache-dtype float16 \
+          \
+          --mm-encoder-tp-mode data \
           --limit-mm-per-prompt "image=4,video=1" \
+          \
+          --enable-prefix-caching \
+          --enable-chunked-prefill \
+          --max-num-seqs 8 \
+          --max-num-batched-tokens 8192 \
+          --block-size 32 \
+          \
+          --disable-custom-all-reduce \
+          \
+          --reasoning-parser qwen3 \
+          --tool-call-parser qwen3_coder \
+          --enable-auto-tool-choice \
+          \
           --host 0.0.0.0 \
           --port 8000
 
-    # healthcheck aligned with vllm-openai standard
     healthcheck:
       test: ["CMD", "python3", "-c",
              "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
@@ -77,8 +105,9 @@ services:
       retries: 5
       start_period: 120s
 
-    # Shared memory for PyTorch multi-GPU comms (NCCL)
-    shm_size: "2gb"
+    # 16GB shm for NCCL TP=2 inter-GPU tensor buffers.
+    # 2GB is insufficient under sustained TP=2 load with 27B model.
+    shm_size: "16gb"
     ulimits:
       memlock: -1
       stack: 67108864

@@ -133,6 +133,8 @@ RUN cd /aeon-patches && \
     python3 patch_kv_cache_utils.py && \
     echo "=== AEON patch 3: cudagraph_align (PIECEWISE spec-decode batch alignment) ===" && \
     python3 patch_cudagraph_align.py && \
+    echo "=== sm_120 patch 4: triton_unified_attention launch config (avoid JIT autotune cold spike) ===" && \
+    python3 patch_sm120_triton_launch.py && \
     echo "[AEON patches] all applied"
 
 # scipy (TurboQuant dep) + TurboQuant AEON fork (CUDA-graph-safe QJL speculative powers)
