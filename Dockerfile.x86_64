@@ -245,6 +245,7 @@ ENV TRITON_CACHE_DIR=/root/.triton
 # libcusolver-13-0     → libcusolver.so     (linear algebra)
 # libcufft-13-0        → libcufft.so        (FFT ops)
 # libcurand-13-0       → libcurand.so       (random sampling)
+# libcurand-dev-13-0   → curand_kernel.h    (FlashInfer JIT: CUTLASS tensor_fill.h includes it)
 # libnvjitlink-13-0    → libnvjitlink.so    (PTX JIT linking for Triton)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends software-properties-common && \
@@ -261,6 +262,7 @@ RUN apt-get update && \
         libcusolver-13-0 \
         libcufft-13-0 \
         libcurand-13-0 \
+        libcurand-dev-13-0 \
         libnvjitlink-13-0 && \
     update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1 && \
     update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 && \
