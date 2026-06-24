@@ -107,6 +107,9 @@ services:
       - /mnt/user/appdata/aeon/triton-cache:/root/.triton
       # torch.compile + CUDA extension cache
       - /mnt/user/appdata/aeon/torch-cache:/root/.cache/torch
+      # FlashInfer JIT kernel cache — fp4_gemm_cutlass_sm120 kernels take ~5 min to
+      # compile on first run. Persisting avoids recompilation on every container restart.
+      - /mnt/user/appdata/aeon/flashinfer-cache:/root/.cache/flashinfer
 
     command:
       - "-c"

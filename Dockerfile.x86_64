@@ -238,6 +238,7 @@ ENV TRITON_CACHE_DIR=/root/.triton
 # Python 3.12 + CUDA runtime math libs needed by PyTorch/Triton/vLLM at runtime.
 # build-essential      →                    (Triton CudaUtils JIT: gcc + libc6-dev/stdlib.h needed to compile cuda_utils.c at startup)
 # python3.12-dev       →                    (Triton CudaUtils JIT: Python.h needed — cuda_utils.c is a Python C extension)
+# cuda-nvcc-13-0       → nvcc               (FlashInfer JIT: compiles fp4_gemm_cutlass_sm120 CUDA kernels on first run)
 # cuda-nvrtc-13-0      → libnvrtc.so        (Triton JIT kernel compilation)
 # libcublas-13-0       → libcublas.so       (PyTorch matmul, attention)
 # libcusparse-13-0     → libcusparse.so     (sparse ops)
@@ -253,6 +254,7 @@ RUN apt-get update && \
         python3.12 python3.12-dev \
         ca-certificates curl \
         build-essential \
+        cuda-nvcc-13-0 \
         cuda-nvrtc-13-0 \
         libcublas-13-0 \
         libcusparse-13-0 \
@@ -284,16 +286,17 @@ COPY --from=builder /usr/local/bin/ /usr/local/bin/
 # Refresh shared library cache after NCCL copy.
 RUN ldconfig
 
-# Smoke-test: verify Triton CudaUtils can compile at build time.
-# cuda_utils.c is a Python C extension that includes cuda.h + Python.h.
-# Compiling it here (without linking libcuda.so.1) catches missing headers
-# before the image is pushed — no GPU needed, fails in seconds not minutes.
+# Smoke-tests — verify JIT toolchain at build time, no GPU required.
+# 1. Triton CudaUtils: gcc compiles a C extension with cuda.h + Python.h
+# 2. FlashInfer CUDA JIT: nvcc must be present for fp4_gemm_cutlass_sm120 kernels
 RUN TRITON_INC=/usr/local/lib/python3.12/dist-packages/triton/backends/nvidia/include && \
     PY_INC=$(python3.12 -c "import sysconfig; print(sysconfig.get_path('include'))") && \
     printf '#include "cuda.h"\n#include <Python.h>\n#include <stdlib.h>\nint x = 0;\n' > /tmp/triton_test.c && \
     gcc -c /tmp/triton_test.c -I"$TRITON_INC" -I"$PY_INC" -o /tmp/triton_test.o && \
     rm /tmp/triton_test.c /tmp/triton_test.o && \
-    echo "[smoke-test] Triton CudaUtils headers OK"
+    echo "[smoke-test] Triton CudaUtils headers OK" && \
+    /usr/local/cuda/bin/nvcc --version && \
+    echo "[smoke-test] nvcc present — FlashInfer JIT will work"
 
 EXPOSE 8000
 ENTRYPOINT ["/bin/bash"]
