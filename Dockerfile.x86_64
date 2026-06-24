@@ -236,7 +236,8 @@ ENV SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM="0.23.0+aeon.x86.sm120"
 ENV TRITON_CACHE_DIR=/root/.triton
 
 # Python 3.12 + CUDA runtime math libs needed by PyTorch/Triton/vLLM at runtime.
-# cuda-nvrtc-13-0      → libnvrtc.so       (Triton JIT kernel compilation)
+# gcc                  →                    (Triton CudaUtils JIT: compiles a small C helper .so on first startup)
+# cuda-nvrtc-13-0      → libnvrtc.so        (Triton JIT kernel compilation)
 # libcublas-13-0       → libcublas.so       (PyTorch matmul, attention)
 # libcusparse-13-0     → libcusparse.so     (sparse ops)
 # libcusolver-13-0     → libcusolver.so     (linear algebra)
@@ -250,6 +251,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         python3.12 \
         ca-certificates curl \
+        gcc \
         cuda-nvrtc-13-0 \
         libcublas-13-0 \
         libcusparse-13-0 \
