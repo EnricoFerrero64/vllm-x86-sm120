@@ -113,12 +113,13 @@ services:
       - |
         python3 -m vllm.entrypoints.openai.api_server \
           --model AEON-7/Qwen3.6-27B-Multimodal-NVFP4-MTP-XS \
+          --served-model-name aeon-qwen3.6-27b \
+          --trust-remote-code \
           --tensor-parallel-size 2 \
           --quantization modelopt \
           --kv-cache-dtype nvfp4 \
           --max-model-len 131072 \
           --gpu-memory-utilization 0.92 \
-          --enforce-eager false \
           --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":4}' \
           \
           --mamba-block-size 256 \
