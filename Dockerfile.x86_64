@@ -284,5 +284,16 @@ COPY --from=builder /usr/local/bin/ /usr/local/bin/
 # Refresh shared library cache after NCCL copy.
 RUN ldconfig
 
+# Smoke-test: verify Triton CudaUtils can compile at build time.
+# cuda_utils.c is a Python C extension that includes cuda.h + Python.h.
+# Compiling it here (without linking libcuda.so.1) catches missing headers
+# before the image is pushed — no GPU needed, fails in seconds not minutes.
+RUN TRITON_INC=/usr/local/lib/python3.12/dist-packages/triton/backends/nvidia/include && \
+    PY_INC=$(python3.12 -c "import sysconfig; print(sysconfig.get_path('include'))") && \
+    printf '#include "cuda.h"\n#include <Python.h>\n#include <stdlib.h>\nint x = 0;\n' > /tmp/triton_test.c && \
+    gcc -c /tmp/triton_test.c -I"$TRITON_INC" -I"$PY_INC" -o /tmp/triton_test.o && \
+    rm /tmp/triton_test.c /tmp/triton_test.o && \
+    echo "[smoke-test] Triton CudaUtils headers OK"
+
 EXPOSE 8000
 ENTRYPOINT ["/bin/bash"]
